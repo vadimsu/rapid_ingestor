@@ -1,0 +1,21 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"7777",
+			"ip":"172.17.0.1"
+		},
+		{
+			"protocol":"TLS",
+			"port":"8888",
+			"ip":"172.17.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"test_table",
+			"database_connection":"database_connection"
+		}
+	]
+}

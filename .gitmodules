@@ -1,3 +1,6 @@
 [submodule "seastar"]
 	path = seastar
 	url = https://github.com/vadimsu/seastar.git
+[submodule "json"]
+	path = json
+	url = https://github.com/nlohmann/json.git
