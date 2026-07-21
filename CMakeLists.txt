@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 find_package (Seastar REQUIRED)
 find_package (Valgrind)
+find_package(ZLIB REQUIRED)
 
 include(FindPkgConfig)
 
@@ -22,6 +23,7 @@ add_executable (
 
 target_link_libraries (
         rapid_ingestor
+	PRIVATE ZLIB::ZLIB
         PRIVATE Seastar::seastar
         )
         set(CMAKE_CXX_FLAGS "-O3 -DSEASTAR_SSTRING -DSEASTAR_HEAPPROF")

@@ -6,6 +6,7 @@
 #include <optional>
 #include <bit>
 #include <vector>
+#include "zlib.h"
 
 namespace RapidIngestor {
 enum class TelemetrySignal : uint8_t { Logs = 0, Metrics = 1, Traces = 2 };
@@ -497,11 +498,21 @@ public:
             } else if (ret < 0) {
                 return (ret == -2) ? -1 : 1;
             }
-            bool compressed = false;
+            std::string algo = "";
             TelemetrySignal signal = TelemetrySignal::Logs;
-            inspect_packed_options(root_array_size, compressed, signal);
-            if (!compressed)
-                parse_stream_by_signal(raw_entries_blob.data(), raw_entries_blob.size(), signal);
+            inspect_packed_options(root_array_size, algo, signal);
+            
+            // Decompress if needed, then parse
+	    if (algo == "gzip"){
+			std::vector<char> decompressed;
+			auto ret = decompress_buffer(raw_entries_blob.data(), raw_entries_blob.size(), decompressed);
+			if (ret != 0){
+				return -1;
+			}
+			parse_stream_by_signal(decompressed.data(), decompressed.size(), signal);
+	    }else{
+			parse_stream_by_signal(raw_entries_blob.data(), raw_entries_blob.size(), signal);
+	    }
         }
         return 0;
     }
@@ -611,12 +622,12 @@ private:
         return 0;
     }
 
-    void inspect_packed_options(size_t total_elements, bool& out_compressed, TelemetrySignal& out_signal) {
-        if (total_elements < 3) { out_compressed = false; out_signal = TelemetrySignal::Logs; return; }
+    void inspect_packed_options(size_t total_elements, std::string& out_algo, TelemetrySignal& out_signal) {
+        if (total_elements < 3) { out_algo = ""; out_signal = TelemetrySignal::Logs; return; }
         uint8_t map_byte = 0;
         if (_cursor.peek_byte(map_byte, 0)) return;
         if ((map_byte & 0xF0) != 0x80 && map_byte != 0xDE && map_byte != 0xDF) {
-            out_compressed = false; out_signal = TelemetrySignal::Logs; return;
+            out_algo = ""; out_signal = TelemetrySignal::Logs; return;
         }
         size_t map_pairs = _cursor.consume_msgpack_header_and_get_len(map_byte);
         for (size_t i = 0; i < map_pairs; ++i) {
@@ -636,7 +647,7 @@ private:
                 if (_cursor.peek_byte(val_byte, 0)) return;
                 _cursor.consume(1);
                 if (val_byte == 0xC3) {
-                    out_compressed = true;
+                    out_algo = "gzip";  // true means gzip
                 } else if (val_byte == 0xA4 || val_byte == 0xD9) {
                     size_t str_len = (val_byte == 0xD9) ?
                         _cursor.consume_msgpack_header_and_get_len(val_byte) : (val_byte & 0x1F);
@@ -647,9 +658,9 @@ private:
                         if (_cursor.read_split(algo_backed, str_len)) return;
                         algo = std::string_view(algo_backed, str_len);
                     } else if (ret < 0) return;
-                    if (algo == "gzip") out_compressed = true;
+                    out_algo = std::string(algo);
                 } else {
-                    out_compressed = false;
+                    out_algo = "";
                 }
             } else if (key == "fluent_signal") {
                 uint8_t val_byte = 0;
@@ -698,6 +709,50 @@ private:
         fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
             parsed_index.count, total_bytes);
         // TODO: dispatch parsed_index to sink
+    }
+
+    int decompress_buffer(const char* data, size_t len, std::vector<char>& decompressedData) {
+        // TODO: Integrate zlib for actual gzip decompression
+        fmt::print("[DEBUG] gzip decompression placeholder, len={}\n", len);
+	z_stream zs;
+	memset(&zs, 0, sizeof(zs));
+
+	// Initialize zlib for gzip decompression (MAX_WBITS + 16 enables gzip decoding)
+	if (inflateInit2(&zs, MAX_WBITS + 16) != Z_OK) {
+		fmt::print("Failed to initialize zlib for inflate.\n");
+		return -1;
+	}
+	zs.next_in = const_cast<Bytef*>(reinterpret_cast<const Bytef*>(data));
+	zs.avail_in = len;
+
+	char outBuffer[32768]; // 32KB chunk
+	int ret;
+	// Decompress chunk by chunk
+	do {
+		zs.next_out = reinterpret_cast<Bytef*>(outBuffer);
+		zs.avail_out = sizeof(outBuffer);
+
+		ret = inflate(&zs, Z_NO_FLUSH);
+
+		if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
+			inflateEnd(&zs);
+			fmt::print("Decompression error during inflate.\n");
+			return -1;
+		}
+
+		// Append the chunk to our vector
+		size_t bytesDecompressed = sizeof(outBuffer) - zs.avail_out;
+		if (bytesDecompressed > 0) {
+			decompressedData.insert(decompressedData.end(), outBuffer, outBuffer + bytesDecompressed);
+		}
+	} while (ret == Z_OK);
+
+	inflateEnd(&zs);
+	if (ret != Z_STREAM_END) {
+		fmt::print("Decompression failed: incomplete stream.\n");
+		return -1;
+	}
+        return 0;
     }
 
     void parse_stream_by_signal(const char* data, size_t len, TelemetrySignal sig) {
