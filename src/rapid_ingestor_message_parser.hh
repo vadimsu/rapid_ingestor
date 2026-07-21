@@ -701,7 +701,66 @@ private:
     }
 
     void parse_stream_by_signal(const char* data, size_t len, TelemetrySignal sig) {
-        fmt::print("{} {}\n", __func__, __LINE__);
+        // Parse a raw binary stream (typically from PackedForward)
+        // Stream contains entries: each entry is [timestamp, record_map]
+        
+        if (len == 0) return;
+        
+        // Create a temporary packet from raw data for cursor operations
+        auto temp_buf = seastar::temporary_buffer<char>(data, len);
+        seastar::net::packet temp_pkt(std::move(temp_buf));
+        PacketCursorFull temp_cursor(temp_pkt);
+        
+        // Parse entries from the stream
+        while (temp_cursor.remaining() > 0) {
+            // Each entry is a [timestamp, record] array
+            uint8_t entry_byte = 0;
+            if (temp_cursor.peek_byte(entry_byte, 0)) break;
+            
+            if ((entry_byte & 0xF0) != 0x90 && entry_byte != 0xDC && entry_byte != 0xDD) {
+                break;
+            }
+            
+            size_t entry_size = temp_cursor.consume_msgpack_header_and_get_len(entry_byte);
+            if (entry_size < 2) break;
+            
+            // Skip timestamp
+            uint8_t time_byte = 0;
+            if (temp_cursor.peek_byte(time_byte, 0)) break;
+            if ((time_byte & 0x80) == 0 || (time_byte & 0xE0) == 0xE0 ||
+                time_byte == 0xCC || time_byte == 0xCD || time_byte == 0xCE || time_byte == 0xCF) {
+                size_t time_len = temp_cursor.consume_msgpack_header_and_get_len(time_byte);
+                temp_cursor.consume(time_len);
+            } else if (time_byte == 0xD7) {
+                temp_cursor.consume(1);
+                uint8_t ext_type = 0;
+                if (temp_cursor.peek_byte(ext_type, 0)) break;
+                temp_cursor.consume(1);
+                temp_cursor.consume(8);
+            } else {
+                break;
+            }
+            
+            // Extract record map
+            uint8_t record_byte = 0;
+            if (temp_cursor.peek_byte(record_byte, 0)) break;
+            
+            PacketCursor cursor_probe(temp_cursor);
+            size_t map_start = cursor_probe.offset();
+            size_t map_pairs = cursor_probe.consume_msgpack_header_and_get_len(record_byte);
+            calculate_msgpack_map_body_length(cursor_probe, map_pairs);
+            size_t map_bytes = cursor_probe.offset() - map_start;
+            
+            std::string_view map_data;
+            auto ret = temp_cursor.try_get_contiguous(map_bytes, map_data);
+            if (ret == 0) {
+                parse_msgpack_map_zero_copy(map_data);
+            } else if (ret == 1) {
+                temp_cursor.peek_and_skip_object();
+            } else {
+                break;
+            }
+        }
     }
 
     TelemetrySignal extract_signal_from_options(size_t total_elements, size_t target_idx) {
