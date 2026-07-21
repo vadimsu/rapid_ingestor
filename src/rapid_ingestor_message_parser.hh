@@ -189,9 +189,6 @@ public:
 			_frag_idx++;
 		}
 		debug_cursor();
-		if (_global_offset == _packet_chain.len() || _frag_idx >= _packet_chain.nr_frags()){
-			reset();
-		}
 	}
 
 	// Recursively steps past any arbitrary MsgPack item to find its boundary

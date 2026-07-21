@@ -20,7 +20,7 @@ namespace RapidIngestor{
 						},
 						[this, this_proto = this->shared_from_this()]{
 							return _connection->receive().then([this] (seastar::temporary_buffer<char> tb){
-									fmt::print("{} {} {}\n",__FILE__,__LINE__,tb.size());
+									fmt::print("[DEBUG] {} received buffer size={}\n",_addr, tb.size());
 									_packetCursor.append(std::move(tb));
 									process_accumulated_bytes();
 								});
@@ -30,10 +30,24 @@ namespace RapidIngestor{
 			void process_accumulated_bytes() {
 				ProtocolEngine protocolEngine(_packetCursor);
 				auto ret = protocolEngine.process_incoming_packet();
-				if  (ret == -1){
+				fmt::print("[DEBUG] {} parser returned {} offset={} remaining={}\n",_addr,
+					ret,
+					_packetCursor.offset(),
+					_packetCursor.remaining());
+				if (ret == -1) {
 					fmt::print("fatal parsing/format error\n");
-				}else{
-					fmt::print("parsing result {}\n", ret);
+				} else if (ret == 0) {
+					// Successful parse - check if all bytes consumed
+					// If so, reset cursor to free packet memory
+					// Otherwise, remaining data is partial next message, keep it
+					if (_packetCursor.remaining() == 0) {
+						fmt::print("[DEBUG] {} all bytes consumed, resetting cursor to free packet memory\n",_addr);
+						_packetCursor.reset();
+					} else {
+						fmt::print("[DEBUG] {} {} bytes remaining for next message\n",_addr, _packetCursor.remaining());
+					}
+				} else {
+					fmt::print("{} parsing result {}\n",_addr, ret);
 				}
 			}
 			seastar::lw_shared_ptr<Connection> _connection;
