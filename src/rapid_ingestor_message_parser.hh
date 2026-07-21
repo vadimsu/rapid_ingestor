@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <bit>
+#include <vector>
 
 namespace RapidIngestor {
 enum class TelemetrySignal : uint8_t { Logs = 0, Metrics = 1, Traces = 2 };
@@ -112,13 +113,6 @@ public:
             _frag_offset -= _packet_chain.frag(_frag_idx).size;
             _frag_idx++;
         }
-    }
-
-    Snapshot save_state()  const { return {_frag_idx, _frag_offset, _global_offset}; }
-    void restore_state(const Snapshot& s) {
-        _frag_idx      = s.frag_idx;
-        _frag_offset   = s.frag_offset;
-        _global_offset = s.global_offset;
     }
 
     // Tries to skip one MsgPack object. Returns false if not enough data.
@@ -546,25 +540,26 @@ private:
             // Record map
             uint8_t record_map_byte = 0;
             if (_cursor.peek_byte(record_map_byte, 0)) return 1;
-            size_t map_start_offset = _cursor.offset();
-            size_t map_pairs_count = _cursor.consume_msgpack_header_and_get_len(record_map_byte);
-            size_t map_payload_len = calculate_msgpack_map_body_length(_cursor, map_pairs_count);
-            size_t map_total_bytes = (_cursor.offset() - map_start_offset) + map_payload_len;
 
+            // Dry-run: snapshot → consume header + traverse pairs → measure total bytes → restore.
+            // This gives us the precise byte span without side-effects on the real cursor.
+            PacketCursor cursor(_cursor);
+            size_t map_start_offset = cursor.offset();
+            size_t map_pairs_count = cursor.consume_msgpack_header_and_get_len(record_map_byte);
+            calculate_msgpack_map_body_length(cursor, map_pairs_count);   // advances cursor through body
+            size_t map_total_bytes = cursor.offset() - map_start_offset;  // header + body
+
+            // Now read the map as a single slice (guaranteed present by fullPacketReceived)
             std::string_view raw_map_slice;
-            char raw_map_slice_backed[map_total_bytes];
             auto ret2 = _cursor.try_get_contiguous(map_total_bytes, raw_map_slice);
-            if (ret2 == 1) {
-                if (_cursor.read_split(raw_map_slice_backed, map_total_bytes)) return 1;
-                raw_map_slice = std::string_view(raw_map_slice_backed, map_total_bytes);
-            } else if (ret2 == -2) {
-                return 1;
-            }
-
-            if (!raw_map_slice.empty()) {
+            if (ret2 == 0) {
+                // Zero-copy: map is contiguous in current fragment
                 StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
-            } else {
+            } else if (ret2 == 1) {
+                // Map spans fragment boundaries — copy-assemble then parse
                 handle_split_map_record(_cursor, map_total_bytes);
+            } else {
+                return (ret2 == -2) ? -1 : 1;
             }
         }
         return 0;
@@ -632,7 +627,7 @@ private:
         }
     }
 
-    size_t calculate_msgpack_map_body_length(PacketCursorFull& cursor, size_t pairs_count) {
+    size_t calculate_msgpack_map_body_length(PacketCursor& cursor, size_t pairs_count) {
         size_t initial_offset = cursor.offset();
         for (size_t i = 0; i < pairs_count; ++i) {
             cursor.peek_and_skip_object();
@@ -644,7 +639,19 @@ private:
     }
 
     void handle_split_map_record(PacketCursorFull& cursor, size_t total_bytes) {
-        fmt::print("{} {}\n", __func__, __LINE__);
+        // Map spans fragment boundaries — assemble into a contiguous heap buffer,
+        // then hand off to the same zero-copy parser used for single-fragment maps.
+        // fullPacketReceived() guarantees total_bytes are present in the chain.
+        std::vector<char> buf(total_bytes);
+        if (cursor.read_split(buf.data(), total_bytes) != 0) {
+            fmt::print("[WARN] handle_split_map_record: read_split failed for {} bytes\n", total_bytes);
+            return;
+        }
+        StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
+            std::string_view(buf.data(), total_bytes));
+        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
+            parsed_index.count, total_bytes);
+        // TODO: dispatch parsed_index to sink
     }
 
     void parse_stream_by_signal(const char* data, size_t len, TelemetrySignal sig) {
@@ -652,7 +659,75 @@ private:
     }
 
     TelemetrySignal extract_signal_from_options(size_t total_elements, size_t target_idx) {
-        return TelemetrySignal::Logs;
+        // Navigate to options map and extract "fluent_signal" key without advancing main cursor.
+        // Uses a temporary copy-constructed PacketCursor for non-destructive probing.
+        if (total_elements <= target_idx) {
+            return TelemetrySignal::Logs;
+        }
+        
+        PacketCursorFull cursor(_cursor);
+        
+        // Skip tag (element 0)
+        if (!cursor.try_skip_object()) {
+            return TelemetrySignal::Logs;
+        }
+        
+        // Skip 2nd element (time/entries/blob)
+        if (!cursor.try_skip_object()) {
+            return TelemetrySignal::Logs;
+        }
+        
+        // Now at options map
+        uint8_t map_byte = 0;
+        if (cursor.peek_byte(map_byte, 0)) {
+            return TelemetrySignal::Logs;
+        }
+        
+        // Check it's a map
+        if ((map_byte & 0xF0) != 0x80 && map_byte != 0xDE && map_byte != 0xDF) {
+            return TelemetrySignal::Logs;
+        }
+        
+        size_t map_pairs = cursor.consume_msgpack_header_and_get_len(map_byte);
+        TelemetrySignal result = TelemetrySignal::Logs;
+        
+        for (size_t i = 0; i < map_pairs; ++i) {
+            uint8_t key_byte = 0;
+            if (cursor.peek_byte(key_byte, 0)) break;
+            size_t key_len = cursor.consume_msgpack_header_and_get_len(key_byte);
+            
+            std::string_view key;
+            char key_backed[key_len + 1];
+            auto ret = cursor.try_get_contiguous(key_len, key);
+            if (ret == 1) {
+                if (cursor.read_split(key_backed, key_len)) break;
+                key = std::string_view(key_backed, key_len);
+            } else if (ret < 0) {
+                break;
+            }
+            
+            if (key == "fluent_signal") {
+                uint8_t val_byte = 0;
+                if (cursor.peek_byte(val_byte, 0)) break;
+                if ((val_byte & 0x80) == 0) {
+                    result = static_cast<TelemetrySignal>(val_byte & 0x7F);
+                    cursor.consume(1);
+                } else if (val_byte == 0xCC) {
+                    cursor.consume(1);
+                    uint8_t tmp = 0;
+                    if (cursor.peek_byte(tmp, 0)) break;
+                    result = static_cast<TelemetrySignal>(tmp);
+                    cursor.consume(1);
+                } else {
+                    cursor.peek_and_skip_object();
+                }
+                break;
+            } else {
+                cursor.peek_and_skip_object();
+            }
+        }
+        
+        return result;
     }
 
     seastar::net::packet _packet_chain;
