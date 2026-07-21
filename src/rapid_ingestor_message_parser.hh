@@ -510,9 +510,55 @@ public:
 
 private:
     int parse_single_message(std::string_view tag) {
-        fmt::print("{} {}\n", __FILE__, __LINE__);
+        // Message format: [tag, time, record, options?]
+        // Skip time (element 1)
+        uint8_t time_type = 0;
+        if (_cursor.peek_byte(time_type, 0)) return 1;
+        if ((time_type & 0x80) == 0 || (time_type & 0xE0) == 0xE0 ||
+            time_type == 0xCC || time_type == 0xCD || time_type == 0xCE || time_type == 0xCF) {
+            size_t time_len = _cursor.consume_msgpack_header_and_get_len(time_type);
+            _cursor.consume(time_len);
+        } else if (time_type == 0xD7) {
+            _cursor.consume(1);
+            uint8_t ext_type = 0;
+            if (_cursor.peek_byte(ext_type, 0)) return 1;
+            _cursor.consume(1);
+            _cursor.consume(8);
+        } else {
+            return 1;
+        }
+
+        // Record map (element 2)
+        uint8_t record_map_byte = 0;
+        if (_cursor.peek_byte(record_map_byte, 0)) return 1;
+
+        PacketCursor cursor(_cursor);
+        size_t map_start_offset = cursor.offset();
+        size_t map_pairs_count = cursor.consume_msgpack_header_and_get_len(record_map_byte);
+        calculate_msgpack_map_body_length(cursor, map_pairs_count);
+        size_t map_total_bytes = cursor.offset() - map_start_offset;
+
+        std::string_view raw_map_slice;
+        auto ret2 = _cursor.try_get_contiguous(map_total_bytes, raw_map_slice);
+        if (ret2 == 0) {
+            StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
+        } else if (ret2 == 1) {
+            handle_split_map_record(_cursor, map_total_bytes);
+        } else {
+            return (ret2 == -2) ? -1 : 1;
+        }
+
+        // Options map (element 3) if present
+        uint8_t opt_byte = 0;
+        if (!_cursor.peek_byte(opt_byte, 0)) {
+            if ((opt_byte & 0xF0) == 0x80 || opt_byte == 0xDE || opt_byte == 0xDF) {
+                _cursor.peek_and_skip_object();
+            }
+        }
+
         return 0;
     }
+
 
     int parse_forward_array(std::string_view tag, size_t entries_count, TelemetrySignal sig) {
         for (size_t i = 0; i < entries_count; ++i) {
