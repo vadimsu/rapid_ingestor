@@ -273,7 +273,7 @@ public:
     // Override consume to emit debug trace during normal parsing
     void consume(size_t len) {
         PacketCursor::consume(len);
-        debug_cursor();
+//        debug_cursor();
     }
 
     uint8_t  read_uint8();
@@ -447,7 +447,7 @@ public:
         size_t tag_len = _cursor.consume_msgpack_header_and_get_len(tag_byte);
         std::string_view tag;
         char tag_backed[tag_len + 1];
-        fmt::print("tag_len {}\n", tag_len);
+//        fmt::print("tag_len {}\n", tag_len);
         auto ret = _cursor.try_get_contiguous(tag_len, tag);
         if (ret == 1) {
             if (_cursor.read_split(tag_backed, tag_len) == -1) return 1;
@@ -457,8 +457,8 @@ public:
         } else if (ret == -1) {
             return 1;
         }
-        fmt::print("tag len {}\n", tag_len);
-        for (auto i = 0; i < (int)tag_len; i++) fmt::print("{}\n", tag.data()[i]);
+//        fmt::print("tag len {}\n", tag_len);
+//        for (auto i = 0; i < (int)tag_len; i++) fmt::print("{}\n", tag.data()[i]);
 
         // 3. Determine mode
         uint8_t format_byte = 0;
@@ -476,7 +476,7 @@ public:
         } else {
             return -1;
         }
-        fmt::print("{} {} {} {}\n", __FILE__, __LINE__, tag, (int)mode);
+  //      fmt::print("{} {} {} {}\n", __FILE__, __LINE__, tag, (int)mode);
 
         // 4. Mode dispatch
         if (mode == ForwardFormat::Message) {
@@ -566,7 +566,7 @@ private:
                 _cursor.peek_and_skip_object();
             }
         }
-
+	fmt::print("Single message is parsed\n");
         return 0;
     }
 
@@ -691,7 +691,7 @@ private:
             cursor.peek_and_skip_object();
         }
         size_t final_offset = cursor.offset();
-        fmt::print("{} {} {}\n", __func__, __LINE__, final_offset - initial_offset);
+//        fmt::print("{} {} {}\n", __func__, __LINE__, final_offset - initial_offset);
         return final_offset - initial_offset;
     }
 
@@ -706,14 +706,14 @@ private:
         }
         StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
             std::string_view(buf.data(), total_bytes));
-        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
+//        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
             parsed_index.count, total_bytes);
         // TODO: dispatch parsed_index to sink
     }
 
     int decompress_buffer(const char* data, size_t len, std::vector<char>& decompressedData) {
         // TODO: Integrate zlib for actual gzip decompression
-        fmt::print("[DEBUG] gzip decompression placeholder, len={}\n", len);
+//        fmt::print("[DEBUG] gzip decompression placeholder, len={}\n", len);
 	z_stream zs;
 	memset(&zs, 0, sizeof(zs));
 

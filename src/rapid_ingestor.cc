@@ -6,6 +6,7 @@
 #include "rapid_ingestor_config.hh"
 #include "rapid_ingestor_tcp_af_helper.hh"
 #include "rapid_ingestor_listener.hh"
+#include "rapid_ingestor_protocol.hh"
 
 namespace bpo = boost::program_options;
 

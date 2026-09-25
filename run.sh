@@ -1,2 +1,3 @@
 #!/bin/bash
-./bin/rapid_ingestor --config ./config.json --single-shard-sockets
+ulimit -n 65535
+./bin/rapid_ingestor --config ./config.json --reactor-backend io_uring
