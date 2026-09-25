@@ -8,16 +8,21 @@
 
 namespace RapidIngestor{
 
-	class ShardedHandler;
+	class Protocol;
 
 	class Listener : public seastar::enable_lw_shared_from_this<Listener> {
 		public:
-			Listener(){}
+			Listener(): _messagesProcessed(0){}
 			~Listener(){fmt::print("{} {}\n",__func__,__LINE__);}
-			seastar::future<> listen(const seastar::sstring&ip, uint16_t port,seastar::sharded<ShardedHandler>& handlers);
+			seastar::future<> listen(const seastar::sstring&ip, uint16_t port);
+			seastar::future<uint64_t> onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol);
+			uint64_t getStats(){
+				return _messagesProcessed;
+			}
 		private:
 			std::shared_ptr<AfHelper> _afHelper;
-//			seastar::sharded<ShardedHandler>& _handlers;
+			std::unordered_map<seastar::socket_address, seastar::lw_shared_ptr<Protocol>> _protocols;
+			uint64_t _messagesProcessed;
 	};
 }
 

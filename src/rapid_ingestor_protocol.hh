@@ -15,17 +15,18 @@ namespace RapidIngestor{
 
 	class Protocol : public seastar::enable_lw_shared_from_this<Protocol> {
 		public:
-			Protocol(seastar::socket_address addr): _addr(addr){}
+			Protocol(seastar::socket_address addr): _addr(addr),_messageCount(0){}
 			~Protocol(){/*fmt::print("{} {}\n",__func__,__LINE__);*/}
-			seastar::future<> onAccepted(seastar::lw_shared_ptr<Connection> connection, ShardedHandler*);
+			seastar::future<uint64_t> onAccepted(seastar::lw_shared_ptr<Connection> connection, Listener*);
 			const seastar::socket_address& getAddress(){ return _addr; }
-			seastar::future<> stop();
+			seastar::future<uint64_t> stop();
 		private:
 			void process_accumulated_bytes();
 			seastar::socket_address _addr;
 			seastar::lw_shared_ptr<Connection> _connection;
 			ProtocolEngine _protocolEngine;
-			ShardedHandler* _shardedHandler;
+			Listener* _listener;
+			uint64_t _messageCount;
 	};
 }
 

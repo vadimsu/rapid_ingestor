@@ -1,4 +1,5 @@
 
+#include<chrono>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/reactor.hh>
 #include <seastar/core/seastar.hh>
@@ -10,7 +11,13 @@
 
 namespace bpo = boost::program_options;
 
-auto handlers = new seastar::sharded<RapidIngestor::ShardedHandler>();
+auto listeners = new seastar::sharded<RapidIngestor::Listener>();
+seastar::timer<> statsTimer = seastar::timer<>();
+uint64_t gMessagesProcessed = 0;
+
+seastar::future<uint64_t> get_all_stats(){
+	return listeners->map_reduce(seastar::adder<uint64_t>(),&RapidIngestor::Listener::getStats);
+}
 
 int main(int argc, char **argv){
 	seastar::app_template app;
@@ -26,23 +33,31 @@ int main(int argc, char **argv){
                 });
 		fmt::print("main\n");
 		return config->read().then([config]{
-				return handlers->start().then([config] {
-					const auto& sources = config->getSources();
-					for (const auto& src : sources){
-						if (src.protocol == "TCP"){
-							auto listener = new seastar::sharded<RapidIngestor::Listener>();
-							return listener->start().then([listener, src] {
-									return listener->invoke_on(0, &RapidIngestor::Listener::listen, src.ipaddr, src.port, std::ref(*handlers));
-							});
-							fmt::print("created listener {} {}\n",src.ipaddr,src.port);
-						}else if (src.protocol == "TLS"){
-							fmt::print("TLS listeners are not supported yet\n");
-						}else{
-							fmt::print("unknown protocol {}\n",src.protocol);
-						}
+				const auto& sources = config->getSources();
+				auto src = sources.begin();
+				for (;src != sources.end();src++){
+					if (src->protocol == "TCP"){
+						break;
+						fmt::print("created listener {} {}\n",src->ipaddr,src->port);
+					}else if (src->protocol == "TLS"){
+						fmt::print("TLS listeners are not supported yet\n");
+					}else{
+						fmt::print("unknown protocol {}\n",src->protocol);
 					}
-					return seastar::make_ready_future<>();
-				});
+				}
+				if (src != sources.end()){
+					return listeners->start().then([source=*src] {
+						statsTimer.set_callback([]{
+							get_all_stats().then([](uint64_t msgs){
+								gMessagesProcessed += msgs;
+								fmt::print("Total messages {}\n",gMessagesProcessed);
+							});
+						});
+						statsTimer.arm_periodic(std::chrono::seconds(5));
+						return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port);
+					});
+				}
+				return seastar::make_ready_future<>();
 			});
-        });
+		});
 }

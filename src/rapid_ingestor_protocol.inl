@@ -6,9 +6,9 @@ namespace RapidIngestor{
 
 thread_local uint64_t _messagesParsed = 0;
 
-seastar::future<> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, ShardedHandler* shardedHandler){
+seastar::future<uint64_t> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, Listener* listener){
 	_connection = connection;
-	_shardedHandler = shardedHandler;
+	_listener = listener;
 	return seastar::do_until([this, this_proto = this->shared_from_this()] {
 				return !_connection->isAlive();
 			},
@@ -19,7 +19,7 @@ seastar::future<> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connec
 					process_accumulated_bytes();
 				});
 			}).then([this]{
-				return _shardedHandler->onProtocolDone(this->shared_from_this());
+				return _listener->onProtocolDone(this->shared_from_this());
 //				return stop();
 //				return seastar::make_ready_future<>();
 			});
@@ -42,15 +42,14 @@ void Protocol::process_accumulated_bytes() {
 		}
 	} else {
 //		fmt::print("{} parsing result {}\n",_addr, ret);
-		_messagesParsed++;
-		if (_messagesParsed % 1000 == 0){
-			fmt::print("{} messages\n",_messagesParsed);
-		}
+		_messageCount++;
 	}
 }
 
-seastar::future<> Protocol::stop(){
-	return _connection->stop();
+seastar::future<uint64_t> Protocol::stop(){
+	return _connection->stop().then([this]{
+			return seastar::make_ready_future<uint64_t>(_messageCount);
+	});
 }
 
 }
