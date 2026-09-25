@@ -4,23 +4,20 @@
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
 #include <seastar/net/inet_address.hh>
-//#include "rapid_ingestor_protocol.hh"
 #include "rapid_ingestor_af_helper.hh"
 
 namespace RapidIngestor{
 
-class Connection;
-class Protocol;
+	class ShardedHandler;
 
 	class Listener : public seastar::enable_lw_shared_from_this<Listener> {
 		public:
-			Listener(std::shared_ptr<AfHelper> afHelper): _afHelper(afHelper){}
+			Listener(){}
 			~Listener(){fmt::print("{} {}\n",__func__,__LINE__);}
-			seastar::future<> listen();
-			seastar::future<> onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol);
+			seastar::future<> listen(const seastar::sstring&ip, uint16_t port,seastar::sharded<ShardedHandler>& handlers);
 		private:
 			std::shared_ptr<AfHelper> _afHelper;
-			std::unordered_map<seastar::socket_address, seastar::lw_shared_ptr<Protocol>> _protocols;
+//			seastar::sharded<ShardedHandler>& _handlers;
 	};
 }
 

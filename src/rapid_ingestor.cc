@@ -10,6 +10,8 @@
 
 namespace bpo = boost::program_options;
 
+auto handlers = new seastar::sharded<RapidIngestor::ShardedHandler>();
+
 int main(int argc, char **argv){
 	seastar::app_template app;
         app.add_options()
@@ -24,27 +26,23 @@ int main(int argc, char **argv){
                 });
 		fmt::print("main\n");
 		return config->read().then([config]{
-				const auto& sources = config->getSources();
-				std::vector<seastar::future<>> futs;
-				std::vector<seastar::lw_shared_ptr<RapidIngestor::Listener>> listeners;
-				for (const auto& src : sources){
-					if (src.protocol == "TCP"){
-						auto tcpAfHelper = std::make_shared<RapidIngestor::TcpAfHelper>(src.ipaddr, src.port);
-						auto listener = seastar::make_lw_shared<RapidIngestor::Listener>(tcpAfHelper);
-						auto fut = listener->listen();
-						listeners.push_back(listener);
-						futs.push_back(std::move(fut));
-						fmt::print("created listener {} {}\n",src.ipaddr,src.port);
-					}else if (src.protocol == "TLS"){
-					}else{
-						fmt::print("unknown protocol {}\n",src.protocol);
+				return handlers->start().then([config] {
+					const auto& sources = config->getSources();
+					for (const auto& src : sources){
+						if (src.protocol == "TCP"){
+							auto listener = new seastar::sharded<RapidIngestor::Listener>();
+							return listener->start().then([listener, src] {
+									return listener->invoke_on(0, &RapidIngestor::Listener::listen, src.ipaddr, src.port, std::ref(*handlers));
+							});
+							fmt::print("created listener {} {}\n",src.ipaddr,src.port);
+						}else if (src.protocol == "TLS"){
+							fmt::print("TLS listeners are not supported yet\n");
+						}else{
+							fmt::print("unknown protocol {}\n",src.protocol);
+						}
 					}
-				}
-				fmt::print("{}\n",futs.size());
-				return when_all(futs.begin(),futs.end()).then([listeners] (auto futs){
-						fmt::print("{} {}\n",__FILE__,__LINE__);
-						return seastar::make_ready_future<>();
-					});
+					return seastar::make_ready_future<>();
+				});
 			});
         });
 }

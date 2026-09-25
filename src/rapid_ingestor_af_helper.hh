@@ -9,7 +9,6 @@ namespace RapidIngestor{
 
 	class AfHelper {
 		public:
-			virtual seastar::future<> listen() = 0;
 			virtual seastar::future<seastar::connected_socket> connect() = 0;
 			virtual seastar::future<seastar::accept_result> accept() = 0;
 			virtual seastar::socket_address getAddress() {

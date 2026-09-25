@@ -6,10 +6,10 @@ namespace RapidIngestor{
 
 thread_local uint64_t _messagesParsed = 0;
 
-void Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, seastar::lw_shared_ptr<Listener> listener){
+seastar::future<> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, ShardedHandler* shardedHandler){
 	_connection = connection;
-	_listener = listener;
-	seastar::do_until([this, this_proto = this->shared_from_this()] {
+	_shardedHandler = shardedHandler;
+	return seastar::do_until([this, this_proto = this->shared_from_this()] {
 				return !_connection->isAlive();
 			},
 			[this, this_proto = this->shared_from_this()]{
@@ -19,7 +19,9 @@ void Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, seastar
 					process_accumulated_bytes();
 				});
 			}).then([this]{
-				_listener->onProtocolDone(this->shared_from_this());
+				return _shardedHandler->onProtocolDone(this->shared_from_this());
+//				return stop();
+//				return seastar::make_ready_future<>();
 			});
 }
 

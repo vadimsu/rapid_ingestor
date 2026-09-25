@@ -1,33 +1,32 @@
 
 #pragma once
 #include "rapid_ingestor_connection.hh"
-#include "rapid_ingestor_protocol.hh"
+#include "rapid_ingestor_sharded_handler.hh"
 
 namespace RapidIngestor{
 
-seastar::future<> Listener::listen(){
-	return _afHelper->listen().then([this]{
-		return seastar::do_until([this]{
-			return false;
-		},
-		[this]{
-			return _afHelper->accept().then([this] (auto ar) mutable {
-				seastar::connected_socket fd = std::move(ar.connection);
-				seastar::socket_address addr = std::move(ar.remote_address);
-				auto protocol = seastar::make_lw_shared<Protocol>(addr);
-				auto conn = seastar::make_lw_shared<Connection>(std::move(fd), addr);
-//				fmt::print("accepted {}\n",addr);
-				_protocols.emplace(protocol->getAddress(), protocol);
-				protocol->onAccepted(conn, this->shared_from_this());
+seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port,seastar::sharded<ShardedHandler>& handlers){
+	_afHelper = std::make_shared<RapidIngestor::TcpAfHelper>(ip, port);
+	return seastar::do_until([this]{
+		return false;
+	},
+	[this, &handlers]{
+		return _afHelper->accept().then([this, &handlers] (auto ar) mutable {
+			seastar::connected_socket fd = std::move(ar.connection);
+			seastar::socket_address addr = std::move(ar.remote_address);
+			// Round-robin or hash-based target shard assignment
+			static unsigned next_shard = 1;
+			unsigned target_shard = next_shard++;
+			if (next_shard == seastar::smp::count){
+				next_shard = 1;
+			}
+
+			// Move the socket ownership to the chosen shard
+//			fmt::print("scheduling connection to {} out of {}\n",target_shard,seastar::smp::count);
+			(void) seastar::smp::submit_to(target_shard, [this, s = std::move(fd), a = std::move(addr), &handlers]() mutable {
+				return handlers.local().handle_connection(std::move(s), std::move(a));
 			});
 		});
-	});
-}
-
-seastar::future<> Listener::onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol){
-	return protocol->stop().then([this, protocol]{
-		_protocols.erase(protocol->getAddress());
-		return seastar::make_ready_future<>();
 	});
 }
 

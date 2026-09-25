@@ -707,7 +707,7 @@ private:
         StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
             std::string_view(buf.data(), total_bytes));
 //        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
-            parsed_index.count, total_bytes);
+//            parsed_index.count, total_bytes);
         // TODO: dispatch parsed_index to sink
     }
 
