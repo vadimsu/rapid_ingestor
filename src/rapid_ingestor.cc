@@ -53,7 +53,7 @@ int main(int argc, char **argv){
 								fmt::print("Total messages {}\n",gMessagesProcessed);
 							});
 						});
-						statsTimer.arm_periodic(std::chrono::seconds(5));
+						statsTimer.arm_periodic(std::chrono::seconds(1));
 						return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port);
 					});
 				}

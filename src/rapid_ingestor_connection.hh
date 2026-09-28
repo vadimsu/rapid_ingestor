@@ -11,10 +11,8 @@ namespace RapidIngestor{
 	class Connection : public seastar::enable_lw_shared_from_this<Connection> {
 		public:
 			Connection(seastar::connected_socket fd, seastar::socket_address addr): _fd(std::move(fd)), _addr(addr), _in(_fd.input()), _out(_fd.output()) {
-//				seastar::input_stream_options stream_opts;
-//				stream_opts.buffer_size = 65536;
-
-//				seastar::input_stream<char> in = seastar::make_file_input_stream(std::move(fd), stream_opts);
+				int size = 1024*1024*10;
+				 _fd.set_sockopt(SOL_SOCKET, SO_SNDBUF, (const void*) &size, sizeof(size));
 			}
 			~Connection(){
 //				fmt::print("{} {}\n",__func__,__LINE__);
