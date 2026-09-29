@@ -357,11 +357,13 @@ inline uint32_t PacketCursorFull::read_uint32() {
 // ---------------------------------------------------------------------------
 class ProtocolEngine {
 public:
-    ProtocolEngine() : _cursor(_packet_chain) {}
+    ProtocolEngine() : _cursor(_packet_chain),_eventsCount(0) {}
 
     void append(seastar::temporary_buffer<char> buf) {
         _packet_chain.append(seastar::net::packet(std::move(buf)));
     }
+
+    uint64_t getElementCount() { return _eventsCount; }
 
     // Returns true if the entire message described by the root array is present
     // in the buffer. Uses a snapshot so the cursor is not advanced.
@@ -553,6 +555,7 @@ private:
         auto ret2 = _cursor.try_get_contiguous(map_total_bytes, raw_map_slice);
         if (ret2 == 0) {
             StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
+	    _eventsCount += parsed_index.count;
         } else if (ret2 == 1) {
             handle_split_map_record(_cursor, map_total_bytes);
         } else {
@@ -566,7 +569,6 @@ private:
                 _cursor.peek_and_skip_object();
             }
         }
-	fmt::print("Single message is parsed\n");
         return 0;
     }
 
@@ -612,6 +614,7 @@ private:
             if (ret2 == 0) {
                 // Zero-copy: map is contiguous in current fragment
                 StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
+		_eventsCount += parsed_index.count;
             } else if (ret2 == 1) {
                 // Map spans fragment boundaries — copy-assemble then parse
                 handle_split_map_record(_cursor, map_total_bytes);
@@ -706,6 +709,7 @@ private:
         }
         StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
             std::string_view(buf.data(), total_bytes));
+	_eventsCount += parsed_index.count;
 //        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
 //            parsed_index.count, total_bytes);
         // TODO: dispatch parsed_index to sink
@@ -759,7 +763,10 @@ private:
         // Parse a raw binary stream (typically from PackedForward)
         // Stream contains entries: each entry is [timestamp, record_map]
         
-        if (len == 0) return;
+        if (len == 0){
+		fmt::print("{} {}\n",__func__,__LINE__);
+		return;
+	}
         
         // Create a temporary packet from raw data for cursor operations
         auto temp_buf = seastar::temporary_buffer<char>(data, len);
@@ -891,6 +898,7 @@ private:
     }
 
     seastar::net::packet _packet_chain;
+    uint64_t _eventsCount;
 };
 
 }

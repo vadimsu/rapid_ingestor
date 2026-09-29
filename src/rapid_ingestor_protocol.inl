@@ -4,24 +4,25 @@
 
 namespace RapidIngestor{
 
-thread_local uint64_t _messagesParsed = 0;
-
-seastar::future<uint64_t> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, Listener* listener){
+seastar::future<RapidIngestorStats> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, Listener* listener){
 	_connection = connection;
 	_listener = listener;
+
 	return seastar::do_until([this, this_proto = this->shared_from_this()] {
 				return !_connection->isAlive();
 			},
 			[this, this_proto = this->shared_from_this()]{
 				return _connection->receive().then([this] (seastar::temporary_buffer<char> tb){
 //						fmt::print("[DEBUG] {} received buffer size={}\n",_addr, tb.size());
+					_stats.bytesProcessed += tb.size();
 					_protocolEngine.append(std::move(tb));
 					process_accumulated_bytes();
 				});
 			}).then([this]{
-				return _listener->onProtocolDone(this->shared_from_this());
-//				return stop();
-//				return seastar::make_ready_future<>();
+				return _listener->onProtocolDone(this->shared_from_this()).then([this_proto = this->shared_from_this()] {
+					this_proto->_stats.messagesParsed = this_proto->_protocolEngine.getElementCount();
+					return seastar::make_ready_future<RapidIngestorStats>(this_proto->getStats());
+				});
 			});
 }
 
@@ -42,13 +43,17 @@ void Protocol::process_accumulated_bytes() {
 		}
 	} else {
 //		fmt::print("{} parsing result {}\n",_addr, ret);
-		_messageCount++;
 	}
 }
 
-seastar::future<uint64_t> Protocol::stop(){
+RapidIngestorStats& Protocol::getStats(){
+	//fmt::print("{} {} {} {} {} {}\n",__FILE__,__func__,__LINE__,_stats.messagesParsed,_stats.bytesProcessed,_addr);
+	return _stats;
+}
+
+seastar::future<> Protocol::stop(){
 	return _connection->stop().then([this]{
-			return seastar::make_ready_future<uint64_t>(_messageCount);
+			return seastar::make_ready_future<>();
 	});
 }
 

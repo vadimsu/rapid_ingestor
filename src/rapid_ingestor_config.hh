@@ -111,17 +111,26 @@ namespace RapidIngestor{
 				                protocol = to_string(*protocol_it);
         	        			protocol = protocol.substr(1, protocol.size() - 2);
 					}
-					if (protocol == "TLS"){
-					}
-					auto ip_it = it->find("ip");
-					if (ip_it != it->end()){
-						ipaddr = to_string(*ip_it);
-						ipaddr = ipaddr.substr(1, ipaddr.size() - 2);
-					}
-		                	auto port_it = it->find("port");
-					if (port_it != it->end()){
-						port = to_string(*port_it);
-						port = port.substr(1, port.size() - 2);
+					if (protocol == "UNIX"){
+						auto path_it = it->find("path");
+						if (path_it != it->end()){
+							ipaddr = to_string(*path_it);
+							ipaddr = ipaddr.substr(1, ipaddr.size() - 2);
+							port = "0";//dummy
+						}
+					}else{
+						if (protocol == "TLS"){
+						}
+						auto ip_it = it->find("ip");
+						if (ip_it != it->end()){
+							ipaddr = to_string(*ip_it);
+							ipaddr = ipaddr.substr(1, ipaddr.size() - 2);
+						}
+						auto port_it = it->find("port");
+						if (port_it != it->end()){
+							port = to_string(*port_it);
+							port = port.substr(1, port.size() - 2);
+						}
 					}
 					fmt::print("Source protocol {} ip {} key {} cert {} trusted {} port {}\n",protocol, ipaddr, key,cert,trusted,port);
 					_sources.addSource(protocol, ipaddr, key, cert, trusted, std::stoi(port));

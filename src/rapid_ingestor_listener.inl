@@ -6,7 +6,11 @@
 namespace RapidIngestor{
 
 seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port){
-	_afHelper = std::make_shared<RapidIngestor::TcpAfHelper>(ip, port);
+	if (port == 0){//unix
+		_afHelper = std::make_shared<RapidIngestor::UnixAfHelper>(ip, port);
+	}else{
+		_afHelper = std::make_shared<RapidIngestor::TcpAfHelper>(ip, port);
+	}
 	return seastar::do_until([this]{
 		return false;
 	},
@@ -18,18 +22,27 @@ seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port){
 			auto conn = seastar::make_lw_shared<Connection>(std::move(fd), addr);
 //			fmt::print("accepted {}\n",addr);
 			_protocols.emplace(protocol->getAddress(), protocol);
-			protocol->onAccepted(conn, this).then([this] (uint64_t messagesProcessed){
-				_messagesProcessed += messagesProcessed;
+			protocol->onAccepted(conn, this).then([this] (RapidIngestorStats stats){
+				_stats += stats;
+				return seastar::make_ready_future<>();
 			});
 		});
 	});
 }
 
-seastar::future<uint64_t> Listener::onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol){
-	return protocol->stop().then([this, protocol] (uint64_t messagesProcessed){
+seastar::future<> Listener::onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol){
+	return protocol->stop().then([this, protocol] {
 		_protocols.erase(protocol->getAddress());
-		return seastar::make_ready_future<uint64_t>(messagesProcessed);
+		return seastar::make_ready_future<>();
 	});
+}
+
+RapidIngestorStats Listener::getStats(){
+	RapidIngestorStats current_stats;
+	for (auto& p : _protocols){
+		current_stats += p.second->getStats();
+	}
+	return _stats + current_stats;
 }
 
 }

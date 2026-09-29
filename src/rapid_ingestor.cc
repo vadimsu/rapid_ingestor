@@ -6,6 +6,7 @@
 #include <seastar/core/when_all.hh>
 #include "rapid_ingestor_config.hh"
 #include "rapid_ingestor_tcp_af_helper.hh"
+#include "rapid_ingestor_unix_af_helper.hh"
 #include "rapid_ingestor_listener.hh"
 #include "rapid_ingestor_protocol.hh"
 
@@ -13,10 +14,10 @@ namespace bpo = boost::program_options;
 
 auto listeners = new seastar::sharded<RapidIngestor::Listener>();
 seastar::timer<> statsTimer = seastar::timer<>();
-uint64_t gMessagesProcessed = 0;
+RapidIngestor::RapidIngestorStats gMessagesProcessed;
 
-seastar::future<uint64_t> get_all_stats(){
-	return listeners->map_reduce(seastar::adder<uint64_t>(),&RapidIngestor::Listener::getStats);
+seastar::future<RapidIngestor::RapidIngestorStats> get_all_stats(){
+	return listeners->map_reduce(seastar::adder<RapidIngestor::RapidIngestorStats>(),&RapidIngestor::Listener::getStats);
 }
 
 int main(int argc, char **argv){
@@ -41,6 +42,10 @@ int main(int argc, char **argv){
 						fmt::print("created listener {} {}\n",src->ipaddr,src->port);
 					}else if (src->protocol == "TLS"){
 						fmt::print("TLS listeners are not supported yet\n");
+					}else if (src->protocol == "UNIX"){
+						fmt::print("removing unix domain socket file {}\n",src->ipaddr);
+						seastar::remove_file(fmt::format("{}",src->ipaddr));
+						break;
 					}else{
 						fmt::print("unknown protocol {}\n",src->protocol);
 					}
@@ -48,9 +53,9 @@ int main(int argc, char **argv){
 				if (src != sources.end()){
 					return listeners->start().then([source=*src] {
 						statsTimer.set_callback([]{
-							get_all_stats().then([](uint64_t msgs){
-								gMessagesProcessed += msgs;
-								fmt::print("Total messages {}\n",gMessagesProcessed);
+							get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
+								gMessagesProcessed += stats;
+								fmt::print("Total messages {} bytes {}\n",stats.messagesParsed, stats.bytesProcessed);
 							});
 						});
 						statsTimer.arm_periodic(std::chrono::seconds(1));
