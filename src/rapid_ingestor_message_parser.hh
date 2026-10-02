@@ -503,7 +503,6 @@ public:
             std::string algo = "";
             TelemetrySignal signal = TelemetrySignal::Logs;
             inspect_packed_options(root_array_size, algo, signal);
-            
             // Decompress if needed, then parse
 	    if (algo == "gzip"){
 			std::vector<char> decompressed;
@@ -577,7 +576,7 @@ private:
         for (size_t i = 0; i < entries_count; ++i) {
             uint8_t entry_array_byte = 0;
             if (_cursor.peek_byte(entry_array_byte, 0)) return 1;
-            if ((entry_array_byte & 0xF0) != 0x90 && entry_array_byte != 0xDC) return -1;
+            if ((entry_array_byte & 0xF0) != 0x90 && entry_array_byte != 0xDC && entry_array_byte != 0xDD) return -1;
             size_t sub_array_len = _cursor.consume_msgpack_header_and_get_len(entry_array_byte);
             if (sub_array_len < 2) return 1;
 
