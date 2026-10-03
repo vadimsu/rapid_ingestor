@@ -29,6 +29,7 @@ namespace RapidIngestor{
 			ProtocolEngine _protocolEngine;
 			Listener* _listener;
 			RapidIngestorStats _stats;
+			bool _fatal_error = false;
 	};
 }
 

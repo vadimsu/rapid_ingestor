@@ -13,6 +13,15 @@ enum class TelemetrySignal : uint8_t { Logs = 0, Metrics = 1, Traces = 2 };
 enum class ForwardFormat     : uint8_t { Message, Forward, PackedForward };
 constexpr size_t MAX_FIELDS_PER_LOG = 32;
 
+// Guard limits against misbehaving/adversarial clients: these keep a single
+// connection's memory use bounded no matter what lengths it declares.
+constexpr size_t MAX_TAG_LEN             = 256;
+constexpr size_t MAX_OPTION_STRING_LEN    = 4096;
+constexpr size_t MAX_ENTRIES_PER_FORWARD  = 1'000'000;
+constexpr size_t MAX_PACKED_BLOB_BYTES    = 64ull * 1024 * 1024;   // single PackedForward chunk
+constexpr size_t MAX_DECOMPRESSED_BYTES   = 256ull * 1024 * 1024;  // zip-bomb guard
+constexpr size_t MAX_PENDING_BYTES        = 32ull * 1024 * 1024;   // unparsed backlog per connection
+
 enum class MsgPackType : uint8_t { Integer, String, Map, Array, Boolean };
 
 struct MsgPackElement {
@@ -114,6 +123,14 @@ public:
             _frag_offset -= _packet_chain.frag(_frag_idx).size;
             _frag_idx++;
         }
+    }
+
+    // Zeroes bookkeeping only — used after the referenced packet_chain has
+    // been replaced wholesale (e.g. ProtocolEngine::compact()).
+    void rebase() {
+        _frag_idx      = 0;
+        _frag_offset   = 0;
+        _global_offset = 0;
     }
 
     // Tries to skip one MsgPack object. Returns false if not enough data.
@@ -363,30 +380,54 @@ public:
         _packet_chain.append(seastar::net::packet(std::move(buf)));
     }
 
+    // net::packet::append() chains deleters onto every fragment ever
+    // appended; already-consumed fragments are never actually freed until
+    // the whole packet is destroyed. Without this, a connection that keeps
+    // trickling in new bytes while only ever having a partial trailing
+    // message buffered would grow memory without bound. Copies just the
+    // unconsumed tail into a fresh packet so old fragments can be freed.
+    void compact() {
+        size_t rem = _cursor.remaining();
+        if (_cursor.offset() == 0) return; // nothing consumed, nothing to reclaim
+        if (rem == 0) {
+            _packet_chain = seastar::net::packet();
+            _cursor.rebase();
+            return;
+        }
+        std::vector<char> tail(rem);
+        _cursor.read_split(tail.data(), rem);
+        _packet_chain = seastar::net::packet(seastar::temporary_buffer<char>(tail.data(), rem));
+        _cursor.rebase();
+    }
+
     uint64_t getElementCount() { return _eventsCount; }
 
-    // Returns true if the entire message described by the root array is present
-    // in the buffer. Uses a snapshot so the cursor is not advanced.
-    bool fullPacketReceived() {
+    // Probes whether the full message at the cursor is present, using a
+    // snapshot so the real cursor is not advanced.
+    // Returns: 0 = complete and ready to parse, 1 = incomplete (need more
+    // data), -1 = protocol violation (never becomes valid, caller should
+    // close the connection rather than keep buffering it).
+    int fullPacketReceived() {
 	PacketCursor cursor(_cursor);
 
         // 1. Root array header
         uint8_t root_byte = 0;
-        if (cursor.peek_byte(root_byte, 0)) return false;
-        if ((root_byte & 0xF0) != 0x90 && root_byte != 0xDC && root_byte != 0xDD) return false;
+        if (cursor.peek_byte(root_byte, 0)) return 1;
+        if ((root_byte & 0xF0) != 0x90 && root_byte != 0xDC && root_byte != 0xDD) return -1;
         size_t root_array_size = cursor.consume_msgpack_header_and_get_len(root_byte);
-        if (root_array_size < 2) return false;
+        if (root_array_size < 2) return -1;
 
         // 2. Skip tag (1st element — always a string)
         uint8_t tag_byte = 0;
-        if (cursor.peek_byte(tag_byte, 0)) return false;
+        if (cursor.peek_byte(tag_byte, 0)) return 1;
         size_t tag_len = cursor.consume_msgpack_header_and_get_len(tag_byte);
-        if (cursor.remaining() < tag_len) return false;
+        if (tag_len > MAX_TAG_LEN) return -1;
+        if (cursor.remaining() < tag_len) return 1;
         cursor.consume(tag_len);
 
         // 3. Peek 2nd element to determine format mode (do NOT consume yet)
         uint8_t format_byte = 0;
-        if (cursor.peek_byte(format_byte, 0)) return false;
+        if (cursor.peek_byte(format_byte, 0)) return 1;
 
         ForwardFormat mode;
         if ((format_byte & 0x80) == 0 || (format_byte & 0xE0) == 0xE0 ||
@@ -399,42 +440,64 @@ public:
                    (format_byte >= 0xC4 && format_byte <= 0xC6)) {
             mode = ForwardFormat::PackedForward;
         } else {
-            return false;
+            return -1;
         }
 
         if (mode == ForwardFormat::Message) {
             // Requires at least [tag, time, record]
-            if (root_array_size < 3) return false;
+            if (root_array_size < 3) return -1;
             // 2nd element: time (integer / ext)
-            if (!cursor.try_skip_object()) return false;
+            if (!cursor.try_skip_object()) return 1;
             // 3rd element: record (map)
-            if (!cursor.try_skip_object()) return false;
+            if (!cursor.try_skip_object()) return 1;
             // 4th element: options (map) — optional
             if (root_array_size >= 4) {
-                if (!cursor.try_skip_object()) return false;
+                if (!cursor.try_skip_object()) return 1;
             }
         } else if (mode == ForwardFormat::Forward) {
+            // Guard: peek the declared entry count before committing to skip it.
+            {
+                PacketCursor probe(cursor);
+                uint8_t b = 0;
+                if (probe.peek_byte(b, 0)) return 1;
+                size_t entries_guess = probe.consume_msgpack_header_and_get_len(b);
+                if (entries_guess > MAX_ENTRIES_PER_FORWARD) return -1;
+            }
             // 2nd element: entries array
-            if (!cursor.try_skip_object()) return false;
+            if (!cursor.try_skip_object()) return 1;
             // 3rd element: options — optional
             if (root_array_size >= 3) {
-                if (!cursor.try_skip_object()) return false;
+                if (!cursor.try_skip_object()) return 1;
             }
         } else { // PackedForward
+            // Guard: peek the declared blob length before committing to skip it.
+            {
+                PacketCursor probe(cursor);
+                uint8_t b = 0;
+                if (probe.peek_byte(b, 0)) return 1;
+                size_t blob_guess = probe.consume_msgpack_header_and_get_len(b);
+                if (blob_guess > MAX_PACKED_BLOB_BYTES) return -1;
+            }
             // 2nd element: binary or string blob
-            if (!cursor.try_skip_object()) return false;
+            if (!cursor.try_skip_object()) return 1;
             // 3rd element: options — optional
             if (root_array_size >= 3) {
-                if (!cursor.try_skip_object()) return false;
+                if (!cursor.try_skip_object()) return 1;
             }
         }
 
-        return true;
+        return 0;
     }
 
     int process_incoming_packet() {
+        // Guard: cap how much unparsed backlog a single connection may hold,
+        // regardless of what any declared length claims (protects against
+        // slow/adversarial clients that never complete a message).
+        if (_cursor.remaining() > MAX_PENDING_BYTES) return -1;
+
         // Gate: reject parsing if the complete message is not yet in the buffer
-        if (!fullPacketReceived()) return 1;
+        int gate = fullPacketReceived();
+        if (gate != 0) return gate;
 
         // 1. Root array header
         uint8_t root_byte = 0;
@@ -447,9 +510,9 @@ public:
         uint8_t tag_byte = 0;
         if (_cursor.peek_byte(tag_byte, 0)) return 1;
         size_t tag_len = _cursor.consume_msgpack_header_and_get_len(tag_byte);
+        if (tag_len > MAX_TAG_LEN) return -1;
         std::string_view tag;
-        char tag_backed[tag_len + 1];
-//        fmt::print("tag_len {}\n", tag_len);
+        char tag_backed[MAX_TAG_LEN + 1];
         auto ret = _cursor.try_get_contiguous(tag_len, tag);
         if (ret == 1) {
             if (_cursor.read_split(tag_backed, tag_len) == -1) return 1;
@@ -486,17 +549,19 @@ public:
             if (r != 0) return r;
         } else if (mode == ForwardFormat::Forward) {
             size_t entries_count = _cursor.consume_msgpack_header_and_get_len(format_byte);
+            if (entries_count > MAX_ENTRIES_PER_FORWARD) return -1;
             TelemetrySignal signal = extract_signal_from_options(root_array_size, 3);
             int r = parse_forward_array(tag, entries_count, signal);
             if (r != 0) return r;
         } else {
             size_t binary_len = _cursor.consume_msgpack_header_and_get_len(format_byte);
+            if (binary_len > MAX_PACKED_BLOB_BYTES) return -1;
             std::string_view raw_entries_blob;
-            char raw_entries_blob_backed[binary_len + 1];
+            std::vector<char> raw_entries_blob_backed(binary_len);
             ret = _cursor.try_get_contiguous(binary_len, raw_entries_blob);
             if (ret == 1) {
-                if (_cursor.read_split(raw_entries_blob_backed, binary_len) == -1) return 1;
-                raw_entries_blob = std::string_view(raw_entries_blob_backed, binary_len);
+                if (_cursor.read_split(raw_entries_blob_backed.data(), binary_len) == -1) return 1;
+                raw_entries_blob = std::string_view(raw_entries_blob_backed.data(), binary_len);
             } else if (ret < 0) {
                 return (ret == -2) ? -1 : 1;
             }
@@ -554,7 +619,7 @@ private:
         auto ret2 = _cursor.try_get_contiguous(map_total_bytes, raw_map_slice);
         if (ret2 == 0) {
             StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
-	    _eventsCount += parsed_index.count;
+	    _eventsCount += /*parsed_index.count*/1;
         } else if (ret2 == 1) {
             handle_split_map_record(_cursor, map_total_bytes);
         } else {
@@ -613,7 +678,7 @@ private:
             if (ret2 == 0) {
                 // Zero-copy: map is contiguous in current fragment
                 StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
-		_eventsCount += parsed_index.count;
+		_eventsCount += /*parsed_index.count*/1;
             } else if (ret2 == 1) {
                 // Map spans fragment boundaries — copy-assemble then parse
                 handle_split_map_record(_cursor, map_total_bytes);
@@ -636,8 +701,14 @@ private:
             uint8_t key_byte = 0;
             if (_cursor.peek_byte(key_byte, 0)) return;
             size_t key_len = _cursor.consume_msgpack_header_and_get_len(key_byte);
+            if (key_len > MAX_OPTION_STRING_LEN) {
+                // Not a key we recognize anyway — stay in sync without copying it.
+                _cursor.consume(key_len);
+                _cursor.peek_and_skip_object();
+                continue;
+            }
             std::string_view key;
-            char key_backed[key_len + 1];
+            char key_backed[MAX_OPTION_STRING_LEN + 1];
             auto ret = _cursor.try_get_contiguous(key_len, key);
             if (ret == 1) {
                 if (_cursor.read_split(key_backed, key_len)) return;
@@ -653,8 +724,13 @@ private:
                 } else if (val_byte == 0xA4 || val_byte == 0xD9) {
                     size_t str_len = (val_byte == 0xD9) ?
                         _cursor.consume_msgpack_header_and_get_len(val_byte) : (val_byte & 0x1F);
+                    if (str_len > MAX_OPTION_STRING_LEN) {
+                        _cursor.consume(str_len);
+                        out_algo = "";
+                        continue;
+                    }
                     std::string_view algo;
-                    char algo_backed[str_len + 1];
+                    char algo_backed[MAX_OPTION_STRING_LEN + 1];
                     ret = _cursor.try_get_contiguous(str_len, algo);
                     if (ret == 1) {
                         if (_cursor.read_split(algo_backed, str_len)) return;
@@ -708,7 +784,7 @@ private:
         }
         StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
             std::string_view(buf.data(), total_bytes));
-	_eventsCount += parsed_index.count;
+	_eventsCount += /*parsed_index.count*/1;
 //        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
 //            parsed_index.count, total_bytes);
         // TODO: dispatch parsed_index to sink
@@ -746,6 +822,11 @@ private:
 		// Append the chunk to our vector
 		size_t bytesDecompressed = sizeof(outBuffer) - zs.avail_out;
 		if (bytesDecompressed > 0) {
+			if (decompressedData.size() + bytesDecompressed > MAX_DECOMPRESSED_BYTES) {
+				inflateEnd(&zs);
+				fmt::print("Decompression aborted: exceeded max decompressed size ({} bytes)\n", MAX_DECOMPRESSED_BYTES);
+				return -1;
+			}
 			decompressedData.insert(decompressedData.end(), outBuffer, outBuffer + bytesDecompressed);
 		}
 	} while (ret == Z_OK);

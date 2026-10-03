@@ -24,12 +24,12 @@ namespace RapidIngestor{
 //				int size = 65535;
 //				_fd.set_sockopt(SOL_SOCKET, SO_RCVBUF, (const void*) &size, sizeof(size));
 //				_fd.set_sockopt(SOL_SOCKET, SO_SNDBUF, (const void*) &size, sizeof(size));
-//				int opt = 4096;
-//				_fd.set_sockopt(SOL_SOCKET, SO_RCVLOWAT, (const void*) &opt, sizeof(opt));
-//				opt = 1;
-//				_fd.set_sockopt(IPPROTO_TCP, TCP_QUICKACK, (const void*) &opt, sizeof(opt));
-//				opt = 1;
-//				_fd.set_sockopt(IPPROTO_TCP, TCP_NODELAY, (const void*) &opt, sizeof(opt));
+				int opt = 4096;
+				_fd.set_sockopt(SOL_SOCKET, SO_RCVLOWAT, (const void*) &opt, sizeof(opt));
+				opt = 1;
+				_fd.set_sockopt(IPPROTO_TCP, TCP_QUICKACK, (const void*) &opt, sizeof(opt));
+				opt = 1;
+				_fd.set_sockopt(IPPROTO_TCP, TCP_NODELAY, (const void*) &opt, sizeof(opt));
 				int flags = SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE;
 
 				_fd.set_sockopt(SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof(flags));

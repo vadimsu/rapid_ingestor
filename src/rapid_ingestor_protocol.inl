@@ -9,7 +9,7 @@ seastar::future<RapidIngestorStats> Protocol::onAccepted(seastar::lw_shared_ptr<
 	_listener = listener;
 
 	return seastar::do_until([this, this_proto = this->shared_from_this()] {
-				return !_connection->isAlive();
+				return !_connection->isAlive() || _fatal_error;
 			},
 			[this, this_proto = this->shared_from_this()]{
 				return _connection->receive().then([this] (seastar::temporary_buffer<char> tb){
@@ -17,6 +17,9 @@ seastar::future<RapidIngestorStats> Protocol::onAccepted(seastar::lw_shared_ptr<
 					_stats.bytesProcessed += tb.size();
 					_protocolEngine.append(std::move(tb));
 					process_accumulated_bytes();
+					// Keep the live count visible via getStats() while the
+					// connection is open, not just once it closes.
+					_stats.messagesParsed = _protocolEngine.getElementCount();
 				});
 			}).then([this]{
 				return _listener->onProtocolDone(this->shared_from_this()).then([this_proto = this->shared_from_this()] {
@@ -27,22 +30,29 @@ seastar::future<RapidIngestorStats> Protocol::onAccepted(seastar::lw_shared_ptr<
 }
 
 void Protocol::process_accumulated_bytes() {
-	auto ret = _protocolEngine.process_incoming_packet();
-//	fmt::print("[DEBUG] {} parser returned {} offset={} remaining={}\n",_addr,
-//		ret,
-//		_protocolEngine._cursor.offset(),
-//		_protocolEngine._cursor.remaining());
-	if (ret == -1) {
-		fmt::print("fatal parsing/format error\n");
-	} else if (ret == 0) {
-		if (_protocolEngine._cursor.remaining() == 0) {
-//			fmt::print("[DEBUG] {} all bytes consumed, resetting cursor to free packet memory\n",_addr);
-			_protocolEngine._cursor.reset();
-		} else {
-//			fmt::print("[DEBUG] {} {} bytes remaining for next message\n",_addr, _protocolEngine._cursor.remaining());
+	// Drain every complete message that is already buffered in one go —
+	// otherwise, under sustained high throughput, complete-but-unparsed
+	// messages pile up in the packet chain (which can only be freed by
+	// destroying/compacting it) and memory grows without bound.
+	for (;;) {
+		auto ret = _protocolEngine.process_incoming_packet();
+		if (ret == -1) {
+			fmt::print("fatal parsing/format error on {}, closing connection\n", _addr);
+			_fatal_error = true;
+			break;
 		}
-	} else {
-//		fmt::print("{} parsing result {}\n",_addr, ret);
+		if (ret == 1) {
+			// Not enough bytes yet for the next message — compact away
+			// already-consumed fragments so the chain doesn't grow forever
+			// while we wait for the rest to arrive.
+			_protocolEngine.compact();
+			break;
+		}
+		// ret == 0: one message parsed; loop in case more are buffered.
+		if (_protocolEngine._cursor.remaining() == 0) {
+			_protocolEngine._cursor.reset();
+			break;
+		}
 	}
 }
 
