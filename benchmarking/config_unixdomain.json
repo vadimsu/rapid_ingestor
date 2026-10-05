@@ -1,0 +1,16 @@
+{
+	"sources":[
+		{
+			"protocol":"UNIX",
+			"port":"0",
+			"path":"/tmp/seastar_forward.sock"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"test_table",
+			"database_connection":"database_connection"
+		}
+	]
+}
