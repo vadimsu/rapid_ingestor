@@ -208,6 +208,8 @@ public:
 		}
 	}
 
+	uint64_t getRowsInserted() const { return _rowsInserted; }
+
 	// Synchronous: encodes the record into this shard's pending batch and
 	// returns immediately. `frame`'s string_views must not be retained past
 	// this call - they point into transient parser buffers.
@@ -259,12 +261,15 @@ private:
 		batch.rows = _pendingPayloads.size();
 		batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", _pendingPayloads));
 #endif
+		size_t rows = batch.rows;
 		_pendingTags.clear();
 		_pendingTimestamps.clear();
 		_pendingPayloads.clear();
 		_pendingBytes = 0;
 		auto table = _table;
-		co_await _conn->insertRows(_table, std::move(batch)).handle_exception([table] (std::exception_ptr ep) {
+		co_await _conn->insertRows(_table, std::move(batch)).then([this, rows] {
+			_rowsInserted += rows;
+		}).handle_exception([table] (std::exception_ptr ep) {
 			fmt::print("ClickHouse sink: insert into {} failed: {}\n", table, ep);
 			return seastar::make_ready_future<>();
 		});
@@ -284,6 +289,7 @@ private:
 	std::vector<seastar::sstring> _pendingPayloads;
 	size_t _pendingBytes = 0;
 	seastar::timer<> _flushTimer;
+	uint64_t _rowsInserted = 0;
 };
 
 } // namespace RapidIngestor

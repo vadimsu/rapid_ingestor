@@ -56,6 +56,7 @@ RapidIngestorStats Listener::getStats(){
 	for (auto& p : _protocols){
 		current_stats += p.second->getStats();
 	}
+	current_stats.rowsInserted = _sink ? _sink->getRowsInserted() : 0;
 	return _stats + current_stats;
 }
 
