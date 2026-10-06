@@ -36,36 +36,41 @@ int main(int argc, char **argv){
 		return config->read().then([config]{
 				const auto& sources = config->getSources();
 				auto src = sources.begin();
+				std::vector<seastar::future<>> futs;
 				for (;src != sources.end();src++){
-					if (src->protocol == "TCP"){
-						break;
+					if (src->protocol == "TCP" || src->protocol == "UNIX"){
+						if (src->protocol == "UNIX"){
+							fmt::print("removing unix domain socket file {}\n",src->ipaddr);
+							seastar::remove_file(fmt::format("{}",src->ipaddr));
+						}
 						fmt::print("created listener {} {}\n",src->ipaddr,src->port);
+						auto fut = listeners->start().then([source=*src, config] {
+							statsTimer.set_callback([]{
+								get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
+									gMessagesProcessed += stats;
+									fmt::print("Total messages {} bytes {}\n",stats.messagesParsed, stats.bytesProcessed);
+								});
+							});
+							statsTimer.arm_periodic(std::chrono::seconds(1));
+							const auto& sinks = config->getSinks();
+							auto sinkIt = sinks.begin();
+							RapidIngestor::Sink sink = (sinkIt != sinks.end()) ? *sinkIt : RapidIngestor::Sink{};
+							fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
+							return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, std::cref(sink)).handle_exception([](std::exception_ptr ep){
+								fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
+								return seastar::make_ready_future<>();
+							});
+						});
+						futs.push_back(std::move(fut));
 					}else if (src->protocol == "TLS"){
 						fmt::print("TLS listeners are not supported yet\n");
-					}else if (src->protocol == "UNIX"){
-						fmt::print("removing unix domain socket file {}\n",src->ipaddr);
-						seastar::remove_file(fmt::format("{}",src->ipaddr));
-						break;
 					}else{
 						fmt::print("unknown protocol {}\n",src->protocol);
 					}
 				}
-				if (src != sources.end()){
-					const auto& sinks = config->getSinks();
-					auto sinkIt = sinks.begin();
-					RapidIngestor::Sink sink = (sinkIt != sinks.end()) ? *sinkIt : RapidIngestor::Sink{};
-					return listeners->start().then([source=*src, sink] {
-						statsTimer.set_callback([]{
-							get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
-								gMessagesProcessed += stats;
-								fmt::print("Total messages {} bytes {}\n",stats.messagesParsed, stats.bytesProcessed);
-							});
-						});
-						statsTimer.arm_periodic(std::chrono::seconds(1));
-						return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink);
-					});
-				}
-				return seastar::make_ready_future<>();
+				return seastar::when_all(futs.begin(), futs.end()).then([] (auto futs){
+					return seastar::make_ready_future<>();
+				});
 			});
 		});
 }

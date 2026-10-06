@@ -6,7 +6,8 @@
 
 namespace RapidIngestor{
 
-seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port, const Sink& sink){
+seastar::future<> Listener::listen(seastar::sstring ip, uint16_t port, Sink sink){
+	fmt::print("{} {} {} {}\n",__func__,__LINE__,sink.mode,sink.database_type);
 	if (!sink.database_type.empty()){
 		_sink = seastar::make_lw_shared<ClickHouseSink>(sink);
 		fmt::print("starting sink\n");

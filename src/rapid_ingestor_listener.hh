@@ -20,7 +20,7 @@ namespace RapidIngestor{
 			// `sink` is optional (database_type empty = no sink configured); when
 			// present, a per-shard ClickHouseSink is started before accepting any
 			// connections and wired into every accepted Protocol.
-			seastar::future<> listen(const seastar::sstring&ip, uint16_t port, const Sink& sink);
+			seastar::future<> listen(seastar::sstring ip, uint16_t port, Sink sink);
 			seastar::future<> onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol);
 			RapidIngestorStats getStats();
 		private:
