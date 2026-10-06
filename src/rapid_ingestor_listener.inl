@@ -2,16 +2,22 @@
 #pragma once
 #include "rapid_ingestor_connection.hh"
 #include "rapid_ingestor_protocol.hh"
+#include "rapid_ingestor_clickhouse_sink.hh"
 
 namespace RapidIngestor{
 
-seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port){
+seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port, const Sink& sink){
+	if (!sink.database_type.empty()){
+		_sink = seastar::make_lw_shared<ClickHouseSink>(sink);
+		fmt::print("starting sink\n");
+		co_await _sink->start();
+	}
 	if (port == 0){//unix
 		_afHelper = std::make_shared<RapidIngestor::UnixAfHelper>(ip, port);
 	}else{
 		_afHelper = std::make_shared<RapidIngestor::TcpAfHelper>(ip, port);
 	}
-	return seastar::do_until([this]{
+	co_await seastar::do_until([this]{
 		return false;
 	},
 	[this]{
@@ -21,6 +27,12 @@ seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port){
 			auto protocol = seastar::make_lw_shared<Protocol>(addr);
 			auto conn = seastar::make_lw_shared<Connection>(std::move(fd), addr);
 //			fmt::print("accepted {}\n",addr);
+			if (_sink) {
+				auto sink = _sink;
+				protocol->setSink([sink] (std::string_view tag, const StackLogFrame& frame) {
+					sink->add(tag, frame);
+				});
+			}
 			_protocols.emplace(protocol->getAddress(), protocol);
 			protocol->onAccepted(conn, this).then([this] (RapidIngestorStats stats){
 				_stats += stats;
@@ -29,6 +41,7 @@ seastar::future<> Listener::listen(const seastar::sstring&ip, uint16_t port){
 		});
 	});
 }
+
 
 seastar::future<> Listener::onProtocolDone(seastar::lw_shared_ptr<Protocol> protocol){
 	return protocol->stop().then([this, protocol] {

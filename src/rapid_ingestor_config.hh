@@ -41,6 +41,15 @@ namespace RapidIngestor{
 		seastar::sstring database_type;
 		seastar::sstring database_table;
 		seastar::sstring database_connection;
+		// ClickHouse native-protocol connection + record serialization mode
+		// ("raw_text" | "tag_map" | "dynamic" | "json"); see
+		// rapid_ingestor_clickhouse_sink.hh for what each mode does.
+		seastar::sstring mode = "raw_text";
+		seastar::sstring host = "127.0.0.1";
+		uint16_t port = 9000;
+		seastar::sstring dbname = "default";
+		seastar::sstring username = "default";
+		seastar::sstring password;
 	};
 	class Sinks{
 		public:
@@ -49,9 +58,9 @@ namespace RapidIngestor{
 
 			Sinks(){fmt::print("_sinks {}\n",_sinks.size());}
 			~Sinks(){fmt::print("{} {}\n",__func__,__LINE__);}
-			void addSink(const seastar::sstring& database_type, const seastar::sstring& database_table, const seastar::sstring& database_connection){
+			void addSink(const Sink& sink){
 				fmt::print("_sinks {}\n",_sinks.size());
-				_sinks.push_back(Sink{database_type: database_type, database_table: database_table, database_connection: database_connection });
+				_sinks.push_back(sink);
 				fmt::print("_sinks {}\n",_sinks.size());
 			}
 			iterator begin() { return _sinks.begin(); }
@@ -145,6 +154,7 @@ namespace RapidIngestor{
                 			return;
 		        	}
 			        for (auto it = sinks_it->begin(); it != sinks_it->end(); it++){
+					Sink sink;
 					std::string db_type, db_table, db_connection;
         	        		auto db_type_it = it->find("database_type");
 					if (db_type_it != it->end()){
@@ -161,9 +171,44 @@ namespace RapidIngestor{
 				                db_connection = to_string(*db_connection_it);
         	        			db_connection = db_connection.substr(1, db_connection.size() - 2);
 					}
-					
-					fmt::print("Sink DB type {} table {} connection {}\n",db_type, db_table,db_connection);
-					_sinks.addSink(db_type, db_table, db_connection);
+					sink.database_type = db_type;
+					sink.database_table = db_table;
+					sink.database_connection = db_connection;
+
+					auto mode_it = it->find("mode");
+					if (mode_it != it->end()){
+						std::string mode = to_string(*mode_it);
+						sink.mode = mode.substr(1, mode.size() - 2);
+					}
+					auto host_it = it->find("host");
+					if (host_it != it->end()){
+						std::string host = to_string(*host_it);
+						sink.host = host.substr(1, host.size() - 2);
+					}
+					auto port_it = it->find("port");
+					if (port_it != it->end()){
+						sink.port = static_cast<uint16_t>(port_it->is_string() ?
+							std::stoi(to_string(*port_it).substr(1, to_string(*port_it).size() - 2)) :
+							port_it->get<int>());
+					}
+					auto dbname_it = it->find("dbname");
+					if (dbname_it != it->end()){
+						std::string dbname = to_string(*dbname_it);
+						sink.dbname = dbname.substr(1, dbname.size() - 2);
+					}
+					auto username_it = it->find("username");
+					if (username_it != it->end()){
+						std::string username = to_string(*username_it);
+						sink.username = username.substr(1, username.size() - 2);
+					}
+					auto password_it = it->find("password");
+					if (password_it != it->end()){
+						std::string password = to_string(*password_it);
+						sink.password = password.substr(1, password.size() - 2);
+					}
+
+					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port);
+					_sinks.addSink(sink);
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);
 	                		}*/

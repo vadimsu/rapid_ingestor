@@ -51,7 +51,10 @@ int main(int argc, char **argv){
 					}
 				}
 				if (src != sources.end()){
-					return listeners->start().then([source=*src] {
+					const auto& sinks = config->getSinks();
+					auto sinkIt = sinks.begin();
+					RapidIngestor::Sink sink = (sinkIt != sinks.end()) ? *sinkIt : RapidIngestor::Sink{};
+					return listeners->start().then([source=*src, sink] {
 						statsTimer.set_callback([]{
 							get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
 								gMessagesProcessed += stats;
@@ -59,7 +62,7 @@ int main(int argc, char **argv){
 							});
 						});
 						statsTimer.arm_periodic(std::chrono::seconds(1));
-						return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port);
+						return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink);
 					});
 				}
 				return seastar::make_ready_future<>();

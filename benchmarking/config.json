@@ -14,8 +14,13 @@
 	"sinks":[
 		{
 			"database_type":"clickhouse",
-			"database_table":"test_table",
-			"database_connection":"database_connection"
+			"database_table":"events",
+			"mode":"raw_text",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default"
 		}
 	]
 }

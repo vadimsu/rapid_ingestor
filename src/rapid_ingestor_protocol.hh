@@ -22,6 +22,7 @@ namespace RapidIngestor{
 			const seastar::socket_address& getAddress(){ return _addr; }
 			seastar::future<> stop();
 			RapidIngestorStats& getStats();
+			void setSink(ProtocolEngine::RecordSink sink) { _protocolEngine.setSink(std::move(sink)); }
 		private:
 			void process_accumulated_bytes();
 			seastar::socket_address _addr;
