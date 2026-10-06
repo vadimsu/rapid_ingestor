@@ -224,7 +224,8 @@ public:
 #else
 		seastar::sstring payload;
 		if (_mode == SinkMode::RawText){
-			encodeRecordFlatText(frame);
+			std::string flat = encodeRecordFlatText(frame);
+			payload = seastar::sstring(flat.data(), flat.size());
 			_pendingBytes += payload.size();
 		}else{
 			fmt::print("mode not supported {}\n",static_cast<int>(_mode));
@@ -243,6 +244,13 @@ private:
 	static constexpr std::chrono::milliseconds kFlushInterval{1000};
 
 	seastar::future<> flush() {
+		// _conn only supports one query in flight at a time; without this guard
+		// the periodic timer and a batch-size-triggered flush() from add() can
+		// overlap and interleave their writes/reads on the same connection,
+		// desyncing the wire protocol (seen as "unexpected EOF reading VarUInt").
+		if (_flushInProgress) {
+			co_return;
+		}
 		ClickHouseNative::ColumnBatch batch;
 #if not_yet
 		if (_pendingTags.empty() || !_conn) {
@@ -267,12 +275,14 @@ private:
 		_pendingPayloads.clear();
 		_pendingBytes = 0;
 		auto table = _table;
+		_flushInProgress = true;
 		co_await _conn->insertRows(_table, std::move(batch)).then([this, rows] {
 			_rowsInserted += rows;
 		}).handle_exception([table] (std::exception_ptr ep) {
 			fmt::print("ClickHouse sink: insert into {} failed: {}\n", table, ep);
 			return seastar::make_ready_future<>();
 		});
+		_flushInProgress = false;
 	}
 
 	seastar::sstring _table;
@@ -290,6 +300,7 @@ private:
 	size_t _pendingBytes = 0;
 	seastar::timer<> _flushTimer;
 	uint64_t _rowsInserted = 0;
+	bool _flushInProgress = false;
 };
 
 } // namespace RapidIngestor
