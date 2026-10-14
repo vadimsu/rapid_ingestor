@@ -19,8 +19,9 @@ Topology differs between runs:
   other running `rapid_ingestor`/`vector` - traffic goes over the real NIC,
   not loopback.
 - The ClickHouse-sink runs (section 2) use that same **two-bare-metal**
-  topology: one machine runs the `fluent-bit` generator, the other runs
-  ClickHouse plus `rapid_ingestor`/`vector`.
+  topology for the base runs, and a **three-bare-metal** topology (generator
+  / ingestor / ClickHouse each on their own box) for the 3-machine variant
+  and batch-size tuning runs.
 
 ## 1. Forward-protocol receive path (forward_traffic_gen)
 
@@ -138,6 +139,36 @@ Takeaways:
   longer shares a host with the ingestor process, but the same pattern
   holds: ClickHouse works much harder to keep up with `rapid_ingestor`'s
   native-protocol inserts than with Vector's HTTP/TabSeparated inserts.
+
+### Batch-size tuning: rapid_ingestor with 10M-row batches (3-machine setup)
+
+`rapid_ingestor`'s ClickHouse sink batches rows before issuing a native
+`INSERT` (`kMaxBatchRows` in `src/rapid_ingestor_clickhouse_sink.hh`,
+currently `10000`). The runs above used that 10K-row default; one more
+3-machine run was done with the batch size raised to **10M rows** to match
+Vector's `batch.max_events = 10000000` setting (`vector_ch.conf`). No extra
+run was needed for Vector since it was already configured at 10M.
+
+| Tool                   | Batch size | Ingestor CPU | ClickHouse CPU | Rows ingested (2 min) | Generator bandwidth |
+|------------------------|-----------:|-------------:|----------------:|-----------------------:|---------------------:|
+| rapid_ingestor         | 10K (default) | 1950%     | 2158%           | 1.74 billion           | 21.9 Gb/s |
+| rapid_ingestor         | 10M        | 1911%        | 20.5%           | 1.73 billion           | 21.7 Gb/s |
+| vector                 | 10M        | 2651%        | 141.4%          | 142.43 million         | 1.81 Gb/s |
+
+Takeaways:
+- Row throughput is essentially unchanged for `rapid_ingestor` between 10K
+  and 10M row batches (1.74B vs 1.73B rows) - the ingestor was never
+  bottlenecked by batch size.
+- Yet with equal batch sizes, once ClickHouse is fed via the Native protocol
+  (`rapid_ingestor`) instead of HTTP (`vector`), ClickHouse's own CPU usage
+  drops significantly (20.5% vs 141.4%).
+
+Bottom line (both at 10M-row batches):
+- `rapid_ingestor` is **~12.1x** faster / capable of handling ~12.1x more
+  data than Vector (1.73 billion vs 142.43 million rows in 2 minutes).
+- At the same time, it lets the ClickHouse server consume **~6.9x less
+  CPU** (20.5% vs 141.4%), thanks to the Native protocol being much more
+  efficient than HTTP for bulk inserts.
 
 ## Notes
 
