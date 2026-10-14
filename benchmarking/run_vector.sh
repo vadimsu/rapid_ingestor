@@ -1,2 +1,2 @@
 #!/bin/bash
-vector -c vector.conf
+vector -c vector_ch.conf
