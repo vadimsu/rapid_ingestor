@@ -53,8 +53,8 @@ int main(int argc, char **argv){
 							});
 							statsTimer.arm_periodic(std::chrono::seconds(1));
 							const auto& sinks = config->getSinks();
-							auto sinkIt = sinks.begin();
-							RapidIngestor::Sink sink = (sinkIt != sinks.end()) ? *sinkIt : RapidIngestor::Sink{};
+							const auto sinkIt = sinks.begin();
+							const RapidIngestor::Sink& sink = *sinkIt;
 							fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
 							return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, std::cref(sink)).handle_exception([](std::exception_ptr ep){
 								fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
