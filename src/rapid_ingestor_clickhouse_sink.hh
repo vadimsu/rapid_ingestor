@@ -161,9 +161,9 @@ public:
 	seastar::future<> start() {
 		_conn = co_await ClickHouseNative::ClickHouseNativeConnection::connect(_host, _port, _dbname, _username, _password);
 		fmt::print("Clickhouse connection established\n");
-#if not_yet
+#if 1
 		co_await _conn->executeQuery(fmt::format(
-			"CREATE TABLE IF NOT EXISTS {} (tag String, ts UInt64, payload String) ENGINE = MergeTree() ORDER BY (tag, ts)",
+			"CREATE TABLE IF NOT EXISTS {} (payload String) ENGINE = MergeTree() ORDER BY (payload)",
 			_table));
 #else
 #endif
@@ -239,8 +239,8 @@ public:
 	}
 
 private:
-	static constexpr size_t kMaxBatchRows = 2000;
-	static constexpr size_t kMaxBatchBytes = 4ull * 1024 * 1024;
+	static constexpr size_t kMaxBatchRows = 10000;
+	static constexpr size_t kMaxBatchBytes = 10ull * 1024 * 1024;
 	static constexpr std::chrono::milliseconds kFlushInterval{1000};
 
 	seastar::future<> flush() {
