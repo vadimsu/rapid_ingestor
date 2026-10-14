@@ -56,7 +56,7 @@ int main(int argc, char **argv){
 							const auto sinkIt = sinks.begin();
 							const RapidIngestor::Sink& sink = *sinkIt;
 							fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
-							return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, std::cref(sink)).handle_exception([](std::exception_ptr ep){
+							return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink).handle_exception([](std::exception_ptr ep){
 								fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
 								return seastar::make_ready_future<>();
 							});

@@ -38,7 +38,7 @@ namespace RapidIngestor{
 			std::vector<Source> _sources;
 	};
 	struct Sink{
-		seastar::sstring database_type;
+		seastar::sstring database_type = "clickhouse";
 		seastar::sstring database_table;
 		seastar::sstring database_connection;
 		// ClickHouse native-protocol connection + record serialization mode
