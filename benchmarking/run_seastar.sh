@@ -19,4 +19,5 @@ ulimit -n 65535
 #./bin/rapid_ingestor --config ./config.json --reactor-backend io_uring --overprovisioned -c 12 --idle-poll-time-us 10
 #./bin/rapid_ingestor --config ./config.json --reactor-backend linux-aio --overprovisioned -c 12 --idle-poll-time-us 10
 #
-../bin/rapid_ingestor --config ./config.json --reactor-backend epoll --overprovisioned -m 2G --reserve-memory 1G --cpus 0-3
+#../bin/rapid_ingestor --config ./config.json --reactor-backend epoll --overprovisioned -m 2G --reserve-memory 1G --cpus 0-3
+../bin/rapid_ingestor --config ./config.json --cpus 0-23

@@ -6,6 +6,7 @@
 #include <optional>
 #include <bit>
 #include <vector>
+#include <functional>
 #include "zlib.h"
 
 namespace RapidIngestor {
@@ -402,6 +403,14 @@ public:
 
     uint64_t getElementCount() { return _eventsCount; }
 
+    // Invoked synchronously (before any co_await) once per fully-parsed
+    // record. Callees must copy out whatever they need before returning -
+    // the StackLogFrame's string_views point into transient buffers (network
+    // fragments or stack/heap scratch space) only guaranteed valid for the
+    // duration of this call.
+    using RecordSink = std::function<void(std::string_view tag, const StackLogFrame&)>;
+    void setSink(RecordSink sink) { _sink = std::move(sink); }
+
     // Probes whether the full message at the cursor is present, using a
     // snapshot so the real cursor is not advanced.
     // Returns: 0 = complete and ready to parse, 1 = incomplete (need more
@@ -575,9 +584,9 @@ public:
 			if (ret != 0){
 				return -1;
 			}
-			parse_stream_by_signal(decompressed.data(), decompressed.size(), signal);
+			parse_stream_by_signal(tag, decompressed.data(), decompressed.size(), signal);
 	    }else{
-			parse_stream_by_signal(raw_entries_blob.data(), raw_entries_blob.size(), signal);
+			parse_stream_by_signal(tag, raw_entries_blob.data(), raw_entries_blob.size(), signal);
 	    }
         }
         return 0;
@@ -586,6 +595,16 @@ public:
     PacketCursorFull _cursor;
 
 private:
+    // Counts the record and forwards it to the sink (if any) in one place, so
+    // every parse path (single message / forward array / split fragment /
+    // packed stream) stays in sync.
+    void dispatch_record(std::string_view tag, const StackLogFrame& frame) {
+        _eventsCount += 1;
+        if (_sink) {
+            _sink(tag, frame);
+        }
+    }
+
     int parse_single_message(std::string_view tag) {
         // Message format: [tag, time, record, options?]
         // Skip time (element 1)
@@ -619,9 +638,9 @@ private:
         auto ret2 = _cursor.try_get_contiguous(map_total_bytes, raw_map_slice);
         if (ret2 == 0) {
             StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
-	    _eventsCount += /*parsed_index.count*/1;
+            dispatch_record(tag, parsed_index);
         } else if (ret2 == 1) {
-            handle_split_map_record(_cursor, map_total_bytes);
+            handle_split_map_record(_cursor, map_total_bytes, tag);
         } else {
             return (ret2 == -2) ? -1 : 1;
         }
@@ -678,10 +697,10 @@ private:
             if (ret2 == 0) {
                 // Zero-copy: map is contiguous in current fragment
                 StackLogFrame parsed_index = parse_msgpack_map_zero_copy(raw_map_slice);
-		_eventsCount += /*parsed_index.count*/1;
+                dispatch_record(tag, parsed_index);
             } else if (ret2 == 1) {
                 // Map spans fragment boundaries — copy-assemble then parse
-                handle_split_map_record(_cursor, map_total_bytes);
+                handle_split_map_record(_cursor, map_total_bytes, tag);
             } else {
                 return (ret2 == -2) ? -1 : 1;
             }
@@ -773,7 +792,7 @@ private:
         return final_offset - initial_offset;
     }
 
-    void handle_split_map_record(PacketCursorFull& cursor, size_t total_bytes) {
+    void handle_split_map_record(PacketCursorFull& cursor, size_t total_bytes, std::string_view tag) {
         // Map spans fragment boundaries — assemble into a contiguous heap buffer,
         // then hand off to the same zero-copy parser used for single-fragment maps.
         // fullPacketReceived() guarantees total_bytes are present in the chain.
@@ -784,10 +803,7 @@ private:
         }
         StackLogFrame parsed_index = parse_msgpack_map_zero_copy(
             std::string_view(buf.data(), total_bytes));
-	_eventsCount += /*parsed_index.count*/1;
-//        fmt::print("[DEBUG] handle_split_map_record: parsed {} fields from {}-byte split map\n",
-//            parsed_index.count, total_bytes);
-        // TODO: dispatch parsed_index to sink
+        dispatch_record(tag, parsed_index);
     }
 
     int decompress_buffer(const char* data, size_t len, std::vector<char>& decompressedData) {
@@ -839,7 +855,7 @@ private:
         return 0;
     }
 
-    void parse_stream_by_signal(const char* data, size_t len, TelemetrySignal sig) {
+    void parse_stream_by_signal(std::string_view tag, const char* data, size_t len, TelemetrySignal sig) {
         // Parse a raw binary stream (typically from PackedForward)
         // Stream contains entries: each entry is [timestamp, record_map]
         
@@ -896,7 +912,7 @@ private:
             std::string_view map_data;
             auto ret = temp_cursor.try_get_contiguous(map_bytes, map_data);
             if (ret == 0) {
-                parse_msgpack_map_zero_copy(map_data);
+                dispatch_record(tag, parse_msgpack_map_zero_copy(map_data));
             } else if (ret == 1) {
                 temp_cursor.peek_and_skip_object();
             } else {
@@ -942,9 +958,16 @@ private:
             uint8_t key_byte = 0;
             if (cursor.peek_byte(key_byte, 0)) break;
             size_t key_len = cursor.consume_msgpack_header_and_get_len(key_byte);
-            
+            if (key_len > MAX_OPTION_STRING_LEN) {
+                // Unbounded peer-controlled length: stay in sync without risking a
+                // stack buffer sized straight from the wire.
+                cursor.consume(key_len);
+                cursor.peek_and_skip_object();
+                continue;
+            }
+
             std::string_view key;
-            char key_backed[key_len + 1];
+            char key_backed[MAX_OPTION_STRING_LEN + 1];
             auto ret = cursor.try_get_contiguous(key_len, key);
             if (ret == 1) {
                 if (cursor.read_split(key_backed, key_len)) break;
@@ -979,6 +1002,7 @@ private:
 
     seastar::net::packet _packet_chain;
     uint64_t _eventsCount;
+    RecordSink _sink;
 };
 
 }
