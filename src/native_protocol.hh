@@ -25,6 +25,7 @@
 #include <seastar/core/coroutine.hh>
 #include <seastar/core/future.hh>
 #include <seastar/core/iostream.hh>
+#include <seastar/core/scattered_message.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
@@ -95,6 +96,24 @@ inline void putVarUInt(std::string& out, uint64_t value) {
 	} while (value);
 }
 
+// Same encoding as putVarUInt(), but written straight through a raw pointer
+// instead of appending to a std::string - used to pack many rows' VarUInt
+// length-prefixes into one pre-sized temporary_buffer (see insertRows()),
+// rather than allocating a std::string per prefix. Returns the number of
+// bytes written.
+inline size_t writeVarUInt(char* dst, uint64_t value) {
+	char* p = dst;
+	do {
+		uint8_t b = value & 0x7f;
+		value >>= 7;
+		if (value) {
+			b |= 0x80;
+		}
+		*p++ = static_cast<char>(b);
+	} while (value);
+	return static_cast<size_t>(p - dst);
+}
+
 inline void putString(std::string& out, const seastar::sstring& s) {
 	putVarUInt(out, s.size());
 	out.append(s.data(), s.size());
@@ -152,15 +171,18 @@ inline void appendJsonEscapedString(std::string& out, const seastar::sstring& s)
 
 // One column of an insert batch: a name, its ClickHouse wire type name (must
 // match a type decodeScalar()/the server understands - String or an
-// unsigned/signed fixed-width integer), and a closure that appends this
-// column's values (in row order) onto the Block being built. Keeping the
-// encoding behind a closure lets insertRows() stay agnostic of the
-// column's underlying value type (seastar::sstring vs uint64_t, ...).
+// unsigned/signed fixed-width integer). Fixed-width columns (e.g. UInt64)
+// are produced via `encode`, a closure that appends every row's bytes onto a
+// shared contiguous buffer. String columns instead populate `string_values`
+// directly and leave `encode` empty, so insertRows() can move each row's
+// bytes straight into the outgoing scatter/gather write with zero copies of
+// the payload data - see makeStringColumn().
 struct Column {
 	seastar::sstring name;
 	seastar::sstring type;
-	size_t encoded_size = 0; // bytes encode() will append - precomputed so the caller can reserve() once
+	size_t encoded_size = 0; // bytes encode()/the string length-prefixes will add - precomputed so buffers can be reserve()'d once
 	std::function<void(std::string&)> encode;
+	std::vector<seastar::sstring> string_values;
 };
 
 // Columnar batch of an arbitrary, caller-defined set of columns, built once
@@ -173,9 +195,13 @@ struct ColumnBatch {
 	bool empty() const { return rows == 0; }
 };
 
-// Builds a String column from `values` (copied/moved in): each row is
-// VarUInt-length-prefixed bytes, ClickHouse type "String".
-inline Column makeStringColumn(seastar::sstring name, std::vector<seastar::sstring>& values) {
+// Builds a String column from `values` (moved in): each row is
+// VarUInt-length-prefixed bytes, ClickHouse type "String". The values
+// themselves are kept on the Column rather than pre-encoded into a buffer -
+// insertRows() moves each one straight into the outgoing write (see its
+// scatter/gather handling of Column::string_values), avoiding an extra copy
+// of every payload's bytes.
+inline Column makeStringColumn(seastar::sstring name, std::vector<seastar::sstring> values) {
 	size_t size = 0;
 	for (auto& v : values) {
 		size += varUIntSize(v.size()) + v.size();
@@ -184,11 +210,7 @@ inline Column makeStringColumn(seastar::sstring name, std::vector<seastar::sstri
 	col.name = std::move(name);
 	col.type = seastar::sstring("String");
 	col.encoded_size = size;
-	col.encode = [values = std::move(values)] (std::string& out) {
-		for (auto& v : values) {
-			putString(out, v);
-		}
-	};
+	col.string_values = std::move(values);
 	return col;
 }
 
@@ -281,6 +303,27 @@ public:
 		if (batch.empty()) {
 			co_return;
 		}
+
+		// seastar::net::packet caps its fragment count at uint16_t (see
+		// packet::impl::_nr_frags / the SEASTAR_ASSERT in its operator new) -
+		// exceeding it aborts the whole process, it's not a catchable error.
+		// Each String column row costs 2 fragments below (length-prefix +
+		// payload), so fail fast - before writing anything to the wire, so
+		// the connection is left untouched/reusable - rather than let a
+		// pathologically large/odd batch (bigger kMaxBatchRows, or multiple
+		// String columns) crash the process deep inside seastar's packet
+		// allocator partway through an INSERT.
+		constexpr size_t kMaxPacketFragments = 60000; // margin below UINT16_MAX for header/end-marker fragments
+		size_t fragmentCount = 1; // trailing empty-data-marker fragment
+		for (const auto& col : batch.columns) {
+			fragmentCount += col.string_values.empty() ? 1 : (1 + 2 * col.string_values.size());
+		}
+		if (fragmentCount > kMaxPacketFragments) {
+			throw std::runtime_error(fmt::format(
+				"insertRows: batch needs {} wire fragments (> {} limit, numRows={}) - reduce batch size or column count",
+				fragmentCount, kMaxPacketFragments, batch.rows));
+		}
+
 		std::string queryText = "INSERT INTO " + table + " (";
 		for (size_t i = 0; i < batch.columns.size(); ++i) {
 			if (i) {
@@ -312,39 +355,117 @@ public:
 
 		const size_t numRows = batch.rows;
 
-		// Compute the exact encoded size up front (mirrors appendDefaultBlockInfo's
-		// fixed 8-byte shape: two 1-byte field markers + 1-byte is_overflows +
-		// 4-byte bucket_number + 1-byte terminator) so dataBuf is allocated once,
-		// instead of growing/reallocating repeatedly as fields are appended below.
-		size_t expectedSize = varUIntSize(static_cast<uint64_t>(ClientPacket::Data));
-		expectedSize += varUIntSize(0); // empty block-name string
-		expectedSize += 8; // appendDefaultBlockInfo()
-		expectedSize += varUIntSize(batch.columns.size());
-		expectedSize += varUIntSize(numRows);
+		// Compute the exact encoded size of the *header* portion up front
+		// (mirrors appendDefaultBlockInfo's fixed 8-byte shape: two 1-byte
+		// field markers + 1-byte is_overflows + 4-byte bucket_number + 1-byte
+		// terminator) so headerBuf is allocated once instead of growing
+		// repeatedly. This deliberately excludes the row bytes of any String
+		// column (Column::string_values) - those are handed to the output
+		// stream as their own zero-copy fragments below instead of being
+		// memcpy'd through headerBuf; only their small per-row VarUInt
+		// length-prefixes are counted here.
+		size_t headerSize = varUIntSize(static_cast<uint64_t>(ClientPacket::Data));
+		headerSize += varUIntSize(0); // empty block-name string
+		headerSize += 8; // appendDefaultBlockInfo()
+		headerSize += varUIntSize(batch.columns.size());
+		headerSize += varUIntSize(numRows);
 		for (const auto& col : batch.columns) {
-			expectedSize += varUIntSize(col.name.size()) + col.name.size();
-			expectedSize += varUIntSize(col.type.size()) + col.type.size();
-			expectedSize += col.encoded_size;
+			headerSize += varUIntSize(col.name.size()) + col.name.size();
+			headerSize += varUIntSize(col.type.size()) + col.type.size();
+			if (col.string_values.empty()) {
+				headerSize += col.encoded_size; // fixed-width column, stays inline below
+			} else {
+				for (const auto& v : col.string_values) {
+					headerSize += varUIntSize(v.size()); // just the length-prefix
+				}
+			}
 		}
 
-		std::string dataBuf;
-		dataBuf.reserve(expectedSize);
-		putVarUInt(dataBuf, static_cast<uint64_t>(ClientPacket::Data));
-		putString(dataBuf, seastar::sstring());
-		appendDefaultBlockInfo(dataBuf);
-		putVarUInt(dataBuf, batch.columns.size());
-		putVarUInt(dataBuf, numRows);
-		for (const auto& col : batch.columns) {
-			putString(dataBuf, col.name);
-			putString(dataBuf, col.type);
-			col.encode(dataBuf);
-		}
-		co_await _out.write(dataBuf);
+		// Scatter/gather write: metadata (block info, column name/type,
+		// length-prefixes) is assembled into small contiguous buffers, and
+		// each String column's row data is referenced - not copied - via
+		// append_static() fragments (a raw pointer+length, no deleter at
+		// all), relying on ordinary C++ scope to keep `batch` (and the
+		// prefix buffers below) alive through the _out.write() co_await.
+		//
+		// An earlier version used the deleter-carrying append(sstring)/
+		// append(temporary_buffer::share()) overloads per row instead. Those
+		// each chain one more seastar::deleter::impl onto a single linked
+		// list (packet::packet(packet&&, fragment, deleter) calls
+		// d.append(std::move(_impl->_deleter)) on every call) - destroying
+		// that packet then recurses once per link (~2 per row), which
+		// stack-overflows for large batches (reported crash: deep, uniform,
+		// repeating frames inside ~deleter()/~impl() for a multi-thousand-
+		// row batch). append_static()'s empty deleter sidesteps that
+		// entirely: see deleter::append()'s early `if (!d._impl) return;`.
+		seastar::scattered_message<char> msg;
+		msg.reserve(static_cast<int>(fragmentCount));
 
-		std::string endBuf;
-		endBuf.reserve(16);
-		appendEmptyDataMarker(endBuf);
-		co_await _out.write(endBuf);
+		std::string headerBuf;
+		headerBuf.reserve(headerSize);
+		putVarUInt(headerBuf, static_cast<uint64_t>(ClientPacket::Data));
+		putString(headerBuf, seastar::sstring());
+		appendDefaultBlockInfo(headerBuf);
+		putVarUInt(headerBuf, batch.columns.size());
+		putVarUInt(headerBuf, numRows);
+
+		// Per-string-column VarUInt length-prefix buffers. Declared here
+		// (not inside the loop below) and reserve()'d to the exact final
+		// column count up front so this vector never reallocates once row
+		// fragments start referencing these buffers' bytes via
+		// append_static() - those references must stay valid through the
+		// _out.write() below.
+		size_t numStringColumns = 0;
+		for (const auto& col : batch.columns) {
+			if (!col.string_values.empty()) {
+				++numStringColumns;
+			}
+		}
+		std::vector<std::string> prefixBufs;
+		prefixBufs.reserve(numStringColumns);
+
+		for (const auto& col : batch.columns) {
+			putString(headerBuf, col.name);
+			putString(headerBuf, col.type);
+			if (col.string_values.empty()) {
+				if (col.encode) {
+					col.encode(headerBuf);
+				}
+				continue;
+			}
+
+			// Pack every row's VarUInt length-prefix for this column into
+			// one buffer up front (one allocation for all rows, not one
+			// per row).
+			size_t prefixBytes = 0;
+			for (const auto& v : col.string_values) {
+				prefixBytes += varUIntSize(v.size());
+			}
+			prefixBufs.emplace_back(prefixBytes, '\0');
+			std::string& prefixBuf = prefixBufs.back();
+			std::vector<size_t> prefixLen(col.string_values.size());
+			char* p = prefixBuf.data();
+			for (size_t i = 0; i < col.string_values.size(); ++i) {
+				size_t n = writeVarUInt(p, col.string_values[i].size());
+				prefixLen[i] = n;
+				p += n;
+			}
+
+			msg.append(seastar::sstring(headerBuf.data(), headerBuf.size()));
+			headerBuf.clear();
+
+			size_t off = 0;
+			for (size_t i = 0; i < col.string_values.size(); ++i) {
+				msg.append_static(prefixBuf.data() + off, prefixLen[i]);
+				off += prefixLen[i];
+				msg.append_static(col.string_values[i].data(), col.string_values[i].size());
+			}
+		}
+
+		appendEmptyDataMarker(headerBuf);
+		msg.append(seastar::sstring(headerBuf.data(), headerBuf.size()));
+
+		co_await _out.write(std::move(msg));
 		co_await _out.flush();
 
 		co_await drainResponses(nullptr);

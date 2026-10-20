@@ -1,0 +1,33 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"24224",
+			"ip":"127.0.0.1"
+		},
+		{
+			"protocol":"TLS",
+			"port":"8888",
+			"ip":"172.17.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"events",
+			"mode":"raw_text",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_rows_per_insert":10000,
+			"max_batch_rows":1000000,
+			"max_batch_bytes":10485760,
+			"backpressure_pause_rows":1000000,
+			"backpressure_resume_rows":400000,
+			"backpressure_pause_bytes":209715200,
+			"backpressure_resume_bytes":104857600
+		}
+	]
+}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <vector>
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
@@ -23,6 +24,17 @@ namespace RapidIngestor{
 			seastar::future<> stop();
 			RapidIngestorStats& getStats();
 			void setSink(ProtocolEngine::RecordSink sink) { _protocolEngine.setSink(std::move(sink)); }
+			// Backpressure: isOverloaded() is polled between reads; when true,
+			// the read loop awaits waitForCapacity() before reading (and thus
+			// parsing/dispatching) any more bytes from this connection - see
+			// onAccepted() in rapid_ingestor_protocol.inl. Left unset (default-
+			// constructed, falsy std::function) for sinks that don't need it.
+			using IsOverloaded = std::function<bool()>;
+			using WaitForCapacity = std::function<seastar::future<>()>;
+			void setBackpressure(IsOverloaded isOverloaded, WaitForCapacity waitForCapacity) {
+				_isOverloaded = std::move(isOverloaded);
+				_waitForCapacity = std::move(waitForCapacity);
+			}
 		private:
 			void process_accumulated_bytes();
 			seastar::socket_address _addr;
@@ -31,6 +43,8 @@ namespace RapidIngestor{
 			Listener* _listener;
 			RapidIngestorStats _stats;
 			bool _fatal_error = false;
+			IsOverloaded _isOverloaded;
+			WaitForCapacity _waitForCapacity;
 	};
 }
 

@@ -33,6 +33,9 @@ seastar::future<> Listener::listen(seastar::sstring ip, uint16_t port, Sink sink
 				protocol->setSink([sink] (std::string_view tag, const StackLogFrame& frame) {
 					sink->add(tag, frame);
 				});
+				protocol->setBackpressure(
+					[sink] { return sink->isOverloaded(); },
+					[sink] { return sink->waitForCapacity(); });
 			}
 			_protocols.emplace(protocol->getAddress(), protocol);
 			protocol->onAccepted(conn, this).then([this] (RapidIngestorStats stats){

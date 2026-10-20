@@ -50,6 +50,13 @@ namespace RapidIngestor{
 		seastar::sstring dbname = "default";
 		seastar::sstring username = "default";
 		seastar::sstring password;
+		size_t max_rows_per_insert = 10000;
+		size_t max_batch_rows = 1000000;
+		size_t max_batch_bytes = 10ull * 1024 * 1024;
+		size_t backpressure_pause_rows = 1000000;
+		size_t backpressure_resume_rows = 400000;
+		size_t backpressure_pause_bytes = 2000ull * 1024 * 1024;
+		size_t backpressure_resume_bytes = 1000ull * 1024 * 1024;
 	};
 	class Sinks{
 		public:
@@ -110,10 +117,10 @@ namespace RapidIngestor{
 		private:
 			void process_sources(nlohmann::json& jsonPayload){
 				auto sources_it = jsonPayload.find("sources");
-			        if (sources_it == jsonPayload.end()) {
-                			return;
-		        	}
-			        for (auto it = sources_it->begin(); it != sources_it->end(); it++){
+			    if (sources_it == jsonPayload.end()) {
+                	return;
+		        }
+			    for (auto it = sources_it->begin(); it != sources_it->end(); it++){
 					std::string protocol, port, key, cert, trusted, ipaddr;
         	        		auto protocol_it = it->find("protocol");
 					if (protocol_it != it->end()){
@@ -146,14 +153,14 @@ namespace RapidIngestor{
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);
 	                		}*/
-	        		}
+	        	}
 			}
 			void process_sinks(nlohmann::json& jsonPayload){
 				auto sinks_it = jsonPayload.find("sinks");
-			        if (sinks_it == jsonPayload.end()) {
-                			return;
-		        	}
-			        for (auto it = sinks_it->begin(); it != sinks_it->end(); it++){
+			    if (sinks_it == jsonPayload.end()) {
+                	return;
+		        }
+			    for (auto it = sinks_it->begin(); it != sinks_it->end(); it++){
 					Sink sink;
 					std::string db_type, db_table, db_connection;
         	        		auto db_type_it = it->find("database_type");
@@ -207,15 +214,64 @@ namespace RapidIngestor{
 						sink.password = password.substr(1, password.size() - 2);
 					}
 
-					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port);
+					auto max_rows_per_insert_it = it->find("max_rows_per_insert");
+					if (max_rows_per_insert_it != it->end()){
+						sink.max_rows_per_insert = static_cast<size_t>(max_rows_per_insert_it->is_string() ?
+							std::stoi(to_string(*max_rows_per_insert_it).substr(1, to_string(*max_rows_per_insert_it).size() - 2)) :
+							max_rows_per_insert_it->get<int>());
+					}
+
+					auto max_batch_rows_it = it->find("max_batch_rows");
+					if (max_batch_rows_it != it->end()){
+						sink.max_batch_rows = static_cast<size_t>(max_batch_rows_it->is_string() ?
+							std::stoi(to_string(*max_batch_rows_it).substr(1, to_string(*max_batch_rows_it).size() - 2)) :
+							max_batch_rows_it->get<int>());
+					}
+					auto max_batch_bytes_it = it->find("max_batch_bytes");
+					if (max_batch_bytes_it != it->end()){
+						sink.max_batch_bytes = static_cast<size_t>(max_batch_bytes_it->is_string() ?
+							std::stoi(to_string(*max_batch_bytes_it).substr(1, to_string(*max_batch_bytes_it).size() - 2)) :
+							max_batch_bytes_it->get<int>());
+					}
+
+					auto backpressure_pause_rows_it = it->find("backpressure_pause_rows");
+					if (backpressure_pause_rows_it != it->end()){
+						sink.backpressure_pause_rows = static_cast<size_t>(backpressure_pause_rows_it->is_string() ?
+							std::stoi(to_string(*backpressure_pause_rows_it).substr(1, to_string(*backpressure_pause_rows_it).size() - 2)) :
+							backpressure_pause_rows_it->get<int>());
+					}
+
+					auto backpressure_resume_rows_it = it->find("backpressure_resume_rows");
+					if (backpressure_resume_rows_it != it->end()){
+						sink.backpressure_resume_rows = static_cast<size_t>(backpressure_resume_rows_it->is_string() ?
+							std::stoi(to_string(*backpressure_resume_rows_it).substr(1, to_string(*backpressure_resume_rows_it).size() - 2)) :
+							backpressure_resume_rows_it->get<int>());
+					}
+
+					auto backpressure_pause_bytes_it = it->find("backpressure_pause_bytes");
+					if (backpressure_pause_bytes_it != it->end()){
+						sink.backpressure_pause_bytes = static_cast<size_t>(backpressure_pause_bytes_it->is_string() ?
+							std::stoi(to_string(*backpressure_pause_bytes_it).substr(1, to_string(*backpressure_pause_bytes_it).size() - 2)) :
+							backpressure_pause_bytes_it->get<int>());
+					}
+
+					auto backpressure_resume_bytes_it = it->find("backpressure_resume_bytes");
+					if (backpressure_resume_bytes_it != it->end()){
+						sink.backpressure_resume_bytes = static_cast<size_t>(backpressure_resume_bytes_it->is_string() ?
+							std::stoi(to_string(*backpressure_resume_bytes_it).substr(1, to_string(*backpressure_resume_bytes_it).size() - 2)) :
+							backpressure_resume_bytes_it->get<int>());
+					}
+
+					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {} max_rows_per_insert {} max_batch_rows {} max_batch_bytes {}\n",
+						db_type, db_table,db_connection, sink.mode, sink.host, sink.port, sink.max_rows_per_insert, sink.max_batch_rows, sink.max_batch_bytes);
 					_sinks.addSink(sink);
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);
 	                		}*/
-	        		}
+				}
 			}
 			void process_json(nlohmann::json& jsonPayload){
-			        process_sources(jsonPayload);
+			    process_sources(jsonPayload);
 				process_sinks(jsonPayload);
 			}
 			seastar::sstring _json_file;

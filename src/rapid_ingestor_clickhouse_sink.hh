@@ -17,11 +17,14 @@
 //   dynamic  - payload is JSON text; `fields Map(String, Variant(...))` MATERIALIZED.
 //   json     - payload is JSON text; `doc JSON` MATERIALIZED (needs CH >= 24.8).
 
+#include <seastar/core/condition-variable.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/core/sstring.hh>
 #include <seastar/core/timer.hh>
 
+#include <charconv>
 #include <chrono>
+#include <cstring>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -48,6 +51,18 @@ inline SinkMode parseSinkMode(const seastar::sstring& mode) {
 
 namespace detail {
 
+// Max bytes std::to_chars() can produce for an int64_t: 19 digits + sign.
+constexpr size_t kMaxInt64TextLen = 20;
+
+// Appends elem.as_int() as decimal text, with no heap allocation (unlike
+// std::to_string(), which allocates and destroys a temporary std::string per
+// call just to copy its digits into `out` right after).
+inline void appendIntAsText(std::string& out, const MsgPackElement& elem) {
+	char buf[kMaxInt64TextLen];
+	auto res = std::to_chars(buf, buf + sizeof(buf), elem.as_int());
+	out.append(buf, res.ptr - buf);
+}
+
 inline void jsonEscapeInto(std::string& out, std::string_view s) {
 	ClickHouseNative::appendJsonEscapedString(out, seastar::sstring(s.data(), s.size()));
 }
@@ -62,7 +77,7 @@ inline void encodeValueAsJson(std::string& out, const MsgPackElement& elem) {
 			out.push_back('"');
 			break;
 		case MsgPackType::Integer:
-			out += std::to_string(elem.as_int());
+			appendIntAsText(out, elem);
 			break;
 		case MsgPackType::Map: {
 			out.push_back('{');
@@ -82,29 +97,71 @@ inline void encodeValueAsJson(std::string& out, const MsgPackElement& elem) {
 	}
 }
 
-// Renders one field's value as the "flat text" format used by RawText mode:
-// same shape, just without JSON quoting/escaping - nested maps become
-// "{k=v;k2=v2}". Deliberately minimal, matching the "simple string
-// serialization" the mode is meant to provide.
-inline void encodeValueAsFlatText(std::string& out, const MsgPackElement& elem) {
+// Upper bound (in bytes) on the "flat text" encoding of one value - used to
+// size the destination seastar::sstring exactly once up front (see
+// encodeRecordFlatText()) so the actual encode can write straight into it
+// through a raw cursor instead of growing a buffer incrementally. Mirrors
+// writeValueFlatText() case-by-case; recursing into nested maps here is
+// cheap (parse_msgpack_map_zero_copy() is just pointer arithmetic over
+// already-received bytes, no allocation) so doing it twice - once to size,
+// once to write - is a good trade for turning two heap allocations (a
+// std::string, then a copy into an sstring) into at most one (the sstring
+// itself, elided entirely by SSO for records <=14 bytes).
+inline size_t flatTextValueBound(const MsgPackElement& elem) {
 	switch (elem.type) {
 		case MsgPackType::Integer:
-			out += std::to_string(elem.as_int());
-			break;
+			return kMaxInt64TextLen;
 		case MsgPackType::Map: {
-			out.push_back('{');
+			StackLogFrame nested = parse_msgpack_map_zero_copy(elem.val);
+			size_t n = 2; // '{' + '}'
+			for (size_t i = 0; i < nested.count; ++i) {
+				if (i) n += 1; // ';'
+				n += nested.elements[i].key.size() + 1 /* '=' */;
+				n += flatTextValueBound(nested.elements[i]);
+			}
+			return n;
+		}
+		default:
+			return elem.val.size();
+	}
+}
+
+inline size_t flatTextRecordBound(const StackLogFrame& frame) {
+	size_t n = 0;
+	for (size_t i = 0; i < frame.count; ++i) {
+		if (i) n += 1; // ','
+		n += frame.elements[i].key.size() + 1 /* '=' */;
+		n += flatTextValueBound(frame.elements[i]);
+	}
+	return n;
+}
+
+// Writes one value in "flat text" form directly through a raw cursor - the
+// buffer `dst` points into must already be sized per flatTextValueBound()/
+// flatTextRecordBound(), so no bounds growth/reallocation ever happens here.
+inline void writeValueFlatText(char*& dst, const MsgPackElement& elem) {
+	switch (elem.type) {
+		case MsgPackType::Integer: {
+			auto res = std::to_chars(dst, dst + kMaxInt64TextLen, elem.as_int());
+			dst = res.ptr;
+			break;
+		}
+		case MsgPackType::Map: {
+			*dst++ = '{';
 			StackLogFrame nested = parse_msgpack_map_zero_copy(elem.val);
 			for (size_t i = 0; i < nested.count; ++i) {
-				if (i) out.push_back(';');
-				out.append(nested.elements[i].key.data(), nested.elements[i].key.size());
-				out.push_back('=');
-				encodeValueAsFlatText(out, nested.elements[i]);
+				if (i) *dst++ = ';';
+				std::memcpy(dst, nested.elements[i].key.data(), nested.elements[i].key.size());
+				dst += nested.elements[i].key.size();
+				*dst++ = '=';
+				writeValueFlatText(dst, nested.elements[i]);
 			}
-			out.push_back('}');
+			*dst++ = '}';
 			break;
 		}
 		default:
-			out.append(elem.val.data(), elem.val.size());
+			std::memcpy(dst, elem.val.data(), elem.val.size());
+			dst += elem.val.size();
 	}
 }
 
@@ -129,15 +186,23 @@ inline std::string encodeRecordJson(const StackLogFrame& frame) {
 }
 
 // Encodes a full record as flat "key=value,key2=value2" text. Used by
-// raw_text mode.
-inline std::string encodeRecordFlatText(const StackLogFrame& frame) {
-	std::string out;
+// raw_text mode. Writes directly into a seastar::sstring sized exactly once
+// up front (flatTextRecordBound()) instead of building a std::string and
+// then copying it into an sstring - see detail::flatTextValueBound() for why
+// that's safe with no further growth.
+inline seastar::sstring encodeRecordFlatText(const StackLogFrame& frame) {
+	size_t bound = detail::flatTextRecordBound(frame);
+	seastar::sstring out(seastar::sstring::initialized_later(), bound);
+	char* dst = out.data();
+	char* const begin = dst;
 	for (size_t i = 0; i < frame.count; ++i) {
-		if (i) out.push_back(',');
-		out.append(frame.elements[i].key.data(), frame.elements[i].key.size());
-		out.push_back('=');
-		detail::encodeValueAsFlatText(out, frame.elements[i]);
+		if (i) *dst++ = ',';
+		std::memcpy(dst, frame.elements[i].key.data(), frame.elements[i].key.size());
+		dst += frame.elements[i].key.size();
+		*dst++ = '=';
+		detail::writeValueFlatText(dst, frame.elements[i]);
 	}
+	out.resize(static_cast<size_t>(dst - begin));
 	return out;
 }
 
@@ -153,7 +218,17 @@ public:
 		, _port(seastar::to_sstring(config.port))
 		, _dbname(config.dbname)
 		, _username(config.username)
-		, _password(config.password) {
+		, _password(config.password)
+		, kMaxBatchRows(config.max_batch_rows)
+		, kMaxBatchBytes(config.max_batch_bytes)
+		, kMaxRowsPerInsert(config.max_rows_per_insert)
+		, kBackpressurePauseRows(config.backpressure_pause_rows)
+		, kBackpressureResumeRows(config.backpressure_resume_rows)
+		, kBackpressurePauseBytes(config.backpressure_pause_bytes)
+		, kBackpressureResumeBytes(config.backpressure_resume_bytes) {
+		// Reserved once; flush()'s _pendingPayloads.clear() keeps this capacity
+		// around, so steady-state add() never grows/reallocates the vector.
+		_pendingPayloads.reserve(kMaxBatchRows);
 	}
 
 	// Connects, creates the landing table if needed, and adds the per-mode
@@ -202,6 +277,10 @@ public:
 
 	seastar::future<> stop() {
 		_flushTimer.cancel();
+		// Release anything parked in waitForCapacity() (see Protocol's read
+		// loop) so a connection backpressure-paused on this sink doesn't
+		// hang forever once the sink itself is shutting down.
+		_capacityAvailable.broken();
 		co_await flush();
 		if (_conn) {
 			co_await _conn->close();
@@ -209,6 +288,45 @@ public:
 	}
 
 	uint64_t getRowsInserted() const { return _rowsInserted; }
+
+	// Backpressure: true once the pending backlog is large enough that the
+	// caller (see Protocol::setBackpressure()/onAccepted()) should stop
+	// reading more bytes from this shard's connections until it drains.
+	// kBackpressurePauseRows/Bytes are deliberately independent of
+	// kMaxBatchRows/kMaxBatchBytes (which just decide when a *normal* flush
+	// is triggered) - this is the actual hard bound on memory: without it,
+	// sustained input outpacing what this shard's single ClickHouse
+	// connection can insert lets _pendingPayloads grow without limit, which
+	// can exhaust memory even while the system overall still has free RAM
+	// (seastar statically partitions memory per shard at startup, so one
+	// overloaded shard can OOM independently of the others).
+	bool isOverloaded() const {
+		return _pendingPayloads.size() >= kBackpressurePauseRows || _pendingBytes >= kBackpressurePauseBytes;
+	}
+
+	// Resolves once the backlog has drained back below the (lower) resume
+	// watermark - signaled from flush() every time it frees up capacity.
+	//
+	// Kicks a flush() itself rather than just waiting: once a connection is
+	// paused here, add() stops being called on it entirely (no more bytes
+	// are being read/parsed), so without this, the *only* thing left that
+	// could ever start a new flush() and signal capacity again is the
+	// kFlushInterval periodic timer - meaning a paused connection could sit
+	// idle for up to a full kFlushInterval (visible as throughput
+	// momentarily dropping to zero) instead of resuming as soon as this
+	// shard's ClickHouse connection is actually free to take more rows.
+	// flush()'s own _flushInProgress guard makes this a safe no-op if a
+	// flush (from the timer, or another paused connection) is already
+	// running; its synchronous prefix (move out _pendingPayloads, clear,
+	// reserve, broadcast) also runs - and so unblocks waiters - in
+	// microseconds, well before the actual chunked insertRows() network
+	// calls even start, so this doesn't wait for a full drain to resume.
+	seastar::future<> waitForCapacity() {
+		(void)flush();
+		co_await _capacityAvailable.wait([this] {
+			return _pendingPayloads.size() < kBackpressureResumeRows && _pendingBytes < kBackpressureResumeBytes;
+		});
+	}
 
 	// Synchronous: encodes the record into this shard's pending batch and
 	// returns immediately. `frame`'s string_views must not be retained past
@@ -222,26 +340,47 @@ public:
 		_pendingTags.emplace_back(tag.data(), tag.size());
 		_pendingTimestamps.push_back(ts_ns);
 #else
-		seastar::sstring payload;
-		if (_mode == SinkMode::RawText){
-			std::string flat = encodeRecordFlatText(frame);
-			payload = seastar::sstring(flat.data(), flat.size());
-			_pendingBytes += payload.size();
-		}else{
-			fmt::print("mode not supported {}\n",static_cast<int>(_mode));
+		if (_mode != SinkMode::RawText) {
+			fmt::print("mode not supported {}\n", static_cast<int>(_mode));
 			return;
 		}
+		// encodeRecordFlatText() now writes straight into the sstring that
+		// ends up stored below, so this is the one allocation per record
+		// (elided by SSO for records <=14 bytes) instead of a std::string
+		// allocation followed by a copy into a second, separate sstring.
+		seastar::sstring payload = encodeRecordFlatText(frame);
+		_pendingBytes += payload.size();
 #endif
-		_pendingPayloads.emplace_back(payload.data(), payload.size());
-		if (_pendingTags.size() >= kMaxBatchRows || _pendingBytes >= kMaxBatchBytes) {
+		// Moved, not copied again, into the pending batch.
+		_pendingPayloads.push_back(std::move(payload));
+		// Pre-existing bug: this used to check _pendingTags.size(), which the
+		// live RawText path never populates (only the dead #if no_yet branch
+		// above does), so it was always 0 and the row-count cap never fired -
+		// only the byte-size cap could ever trigger a flush. That let batches
+		// grow far past kMaxBatchRows for small records, which is unsafe now
+		// that insertRows() caps its wire fragment count (see native_protocol.hh).
+		if (_pendingPayloads.size() >= kMaxBatchRows || _pendingBytes >= kMaxBatchBytes) {
 			(void)flush();
 		}
 	}
 
 private:
-	static constexpr size_t kMaxBatchRows = 10000;
-	static constexpr size_t kMaxBatchBytes = 10ull * 1024 * 1024;
+	size_t kMaxBatchRows/* = 1000000*/;
+	size_t kMaxBatchBytes/* = 10ull * 1024 * 1024*/;
 	static constexpr std::chrono::milliseconds kFlushInterval{1000};
+	// Max rows sent in a single insertRows() call. Deliberately a *separate*
+	// constant from kMaxBatchRows (which only controls when add() decides to
+	// trigger a flush at all, and can reasonably be tuned far higher - e.g.
+	// to mostly rely on kMaxBatchBytes/the periodic timer instead) - flush()
+	// always splits whatever backlog it has into kMaxRowsPerInsert-sized
+	// chunks, so a single insertRows() call's wire-fragment count never gets
+	// anywhere near its guard regardless of how kMaxBatchRows is tuned.
+	size_t kMaxRowsPerInsert/* = 10000*/;
+	// See isOverloaded()/waitForCapacity() above.
+	size_t kBackpressurePauseRows/* = 1000000*/;
+	size_t kBackpressureResumeRows/* = 400000*/;
+	size_t kBackpressurePauseBytes/* = 2000ull * 1024 * 1024*/;
+	size_t kBackpressureResumeBytes/* = 1000ull * 1024 * 1024*/;
 
 	seastar::future<> flush() {
 		// _conn only supports one query in flight at a time; without this guard
@@ -251,37 +390,71 @@ private:
 		if (_flushInProgress) {
 			co_return;
 		}
-		ClickHouseNative::ColumnBatch batch;
 #if not_yet
 		if (_pendingTags.empty() || !_conn) {
 			co_return;
 		}
-		batch.rows = _pendingTags.size();
-#endif
-#if not_yet
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("tag", std::move(_pendingTags)));
-		batch.columns.push_back(ClickHouseNative::makeUInt64Column("ts", "UInt64", std::move(_pendingTimestamps)));
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", std::move(_pendingPayloads)));
 #else
-		if (_pendingPayloads.empty() || !_conn){
+		if (_pendingPayloads.empty() || !_conn) {
 			co_return;
 		}
-		batch.rows = _pendingPayloads.size();
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", _pendingPayloads));
 #endif
-		size_t rows = batch.rows;
 		_pendingTags.clear();
 		_pendingTimestamps.clear();
-		_pendingPayloads.clear();
-		_pendingBytes = 0;
 		auto table = _table;
 		_flushInProgress = true;
-		co_await _conn->insertRows(_table, std::move(batch)).then([this, rows] {
-			_rowsInserted += rows;
-		}).handle_exception([table] (std::exception_ptr ep) {
-			fmt::print("ClickHouse sink: insert into {} failed: {}\n", table, ep);
-			return seastar::make_ready_future<>();
-		});
+
+		// Keep draining as long as there's a backlog, not just the one
+		// snapshot that was pending when this call started. Under
+		// sustained overload (input rate persistently exceeding what this
+		// shard's single ClickHouse connection can insert), anything that
+		// accumulates into the *next* _pendingPayloads while this call's
+		// own insertRows() awaits below would otherwise have nothing left
+		// to drain it: add()'s/waitForCapacity()'s own "kick a flush" calls
+		// just no-op while _flushInProgress is true, so without this loop
+		// the backlog would sit idle until the next periodic timer tick
+		// (or another external caller) picks it up - exactly the kind of
+		// stall (observed as throughput dropping to zero) this is meant to
+		// avoid.
+		while (!_pendingPayloads.empty()) {
+			// add()'s kMaxBatchRows check only runs on the *next* add() call, so
+			// while this flush's own insertRows() co_await below is suspended,
+			// more add() calls can keep growing _pendingPayloads well past
+			// kMaxBatchRows. Hand off the whole backlog here, but split it
+			// into kMaxRowsPerInsert-sized sub-batches sent as separate,
+			// sequential insertRows() calls, so no single call's wire-fragment
+			// count ever approaches insertRows()'s guard, however large the
+			// backlog grew (and independent of how kMaxBatchRows is tuned).
+			std::vector<seastar::sstring> pending = std::move(_pendingPayloads);
+			// `pending` just took _pendingPayloads's buffer, so it has no capacity
+			// left; re-reserve immediately so the next add()...add() run back up
+			// to kMaxBatchRows doesn't reallocate/copy-grow the vector again.
+			_pendingPayloads.clear();
+			_pendingPayloads.reserve(kMaxBatchRows);
+			_pendingBytes = 0;
+			// _pendingPayloads/​_pendingBytes just dropped back to 0, so any
+			// connection parked in waitForCapacity() can very likely proceed
+			// now - wake them immediately rather than making them wait for
+			// this round's (possibly many-chunk) insertRows() calls to
+			// finish too.
+			_capacityAvailable.broadcast();
+			for (size_t offset = 0; offset < pending.size(); offset += kMaxRowsPerInsert) {
+				size_t chunkRows = std::min(kMaxRowsPerInsert, pending.size() - offset);
+				std::vector<seastar::sstring> chunk(
+					std::make_move_iterator(pending.begin() + offset),
+					std::make_move_iterator(pending.begin() + offset + chunkRows));
+				ClickHouseNative::ColumnBatch batch;
+				batch.rows = chunkRows;
+				batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", std::move(chunk)));
+				co_await _conn->insertRows(table, std::move(batch)).then([this, chunkRows] {
+					_rowsInserted += chunkRows;
+				}).handle_exception([table, offset, chunkRows] (std::exception_ptr ep) {
+					fmt::print("ClickHouse sink: insert into {} failed for rows [{}, {}): {}\n",
+						table, offset, offset + chunkRows, ep);
+					return seastar::make_ready_future<>();
+				});
+			}
+		}
 		_flushInProgress = false;
 	}
 
@@ -301,6 +474,7 @@ private:
 	seastar::timer<> _flushTimer;
 	uint64_t _rowsInserted = 0;
 	bool _flushInProgress = false;
+	seastar::condition_variable _capacityAvailable;
 };
 
 } // namespace RapidIngestor
