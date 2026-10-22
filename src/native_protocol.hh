@@ -173,13 +173,13 @@ struct ColumnBatch {
 	bool empty() const { return rows == 0; }
 };
 
-inline Column makePrebakedStringColumn(seastar::sstring name, std::string serialized_data) {
+inline Column makePrebakedStringColumn(seastar::sstring&& name, std::string&& serialized_data) {
    	Column col;
    	col.name = std::move(name);
    	col.type = seastar::sstring("String");
    	col.encoded_size = serialized_data.size();
    	col.encode = [data = std::move(serialized_data)](std::string& out) {
-       	out.append(data); // 1 bulk copy, 0 string loops
+		out.append(data); // 1 bulk copy, 0 string loops
    	};
    	return col;
 }
@@ -288,11 +288,11 @@ public:
 	// Block sent for it, in order - this generalizes what used to be a
 	// hardcoded (event UInt64, payload String) shape to whatever columns the
 	// caller built with makeStringColumn()/makeUInt64Column().
-	seastar::future<> insertRows(seastar::sstring table, ColumnBatch batch) {
+	seastar::future<> insertRows(seastar::sstring& table, ColumnBatch&& batch) {
 		if (batch.empty()) {
 			co_return;
 		}
-		std::string queryText = "INSERT INTO " + table + " (";
+		std::string queryText = "INSERT INTO " + std::move(table) + " (";
 		for (size_t i = 0; i < batch.columns.size(); ++i) {
 			if (i) {
 				queryText += ", ";

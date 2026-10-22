@@ -48,7 +48,8 @@ int main(int argc, char **argv){
 							statsTimer.set_callback([]{
 								get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
 									gMessagesProcessed += stats;
-									fmt::print("Total messages {} bytes {} rows inserted {}\n",stats.messagesParsed, stats.bytesProcessed, stats.rowsInserted);
+									fmt::print("Total messages {} bytes {} rows inserted {} unparsed {} fatal errors {}\n",
+											stats.messagesParsed, stats.bytesProcessed, stats.rowsInserted, stats.unparsedBufferSize,stats.fatalErrors);
 								});
 							});
 							statsTimer.arm_periodic(std::chrono::seconds(1));

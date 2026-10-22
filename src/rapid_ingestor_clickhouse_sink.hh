@@ -91,9 +91,9 @@ inline void encodeValueAsFlatText(std::string& out, const MsgPackElement& elem) 
 	switch (elem.type) {
 		case MsgPackType::Integer:{
 			char buf[24];
-            auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), elem.as_int());
-            out.append(buf, ptr - buf);
-            break;
+			auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), elem.as_int());
+			out.append(buf, ptr - buf);
+			break;
 		}
 		case MsgPackType::Map: {
 			out.push_back('{');
@@ -229,10 +229,11 @@ public:
 			fmt::print("mode not supported {}\n",static_cast<int>(_mode));
 			return;
 		}
+		auto size = _scratchBuffer.size();
 		ClickHouseNative::putVarUInt(_payloadColumnData, _scratchBuffer.size());
-        _payloadColumnData.append(_scratchBuffer);
+	        _payloadColumnData.append(std::move(_scratchBuffer));
 		_pendingRows++;
-		_pendingBytes += _scratchBuffer.size();
+		_pendingBytes += size;
 		if (_pendingBytes >= _maxBatchBytes) {
 			(void)flush();
 		}
@@ -265,15 +266,14 @@ private:
 		}
 		ClickHouseNative::ColumnBatch batch;
 		batch.rows = _pendingRows;
-
 		std::string column_data = std::move(_payloadColumnData);
 
 		if (!_conn){
 			co_return;
 		}
 		_payloadColumnData = std::string();
-    	_payloadColumnData.reserve(_maxBatchBytes + 65536); // Pre-allocate!
-    	_pendingRows = 0;
+		_payloadColumnData.reserve(_maxBatchBytes + 65536); // Pre-allocate!
+		_pendingRows = 0;
 		batch.columns.push_back(ClickHouseNative::makePrebakedStringColumn("payload", std::move(column_data)));
 
 		auto table = _table;
@@ -299,7 +299,7 @@ private:
 	seastar::lw_shared_ptr<ClickHouseNative::ClickHouseNativeConnection> _conn;
 
 	std::string _payloadColumnData;
-    std::string _scratchBuffer;
+	std::string _scratchBuffer;
 	size_t _pendingRows = 0;
 	size_t _pendingBytes = 0;
 	seastar::timer<> _flushTimer;
