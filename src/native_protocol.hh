@@ -173,6 +173,17 @@ struct ColumnBatch {
 	bool empty() const { return rows == 0; }
 };
 
+inline Column makePrebakedStringColumn(seastar::sstring name, std::string serialized_data) {
+   	Column col;
+   	col.name = std::move(name);
+   	col.type = seastar::sstring("String");
+   	col.encoded_size = serialized_data.size();
+   	col.encode = [data = std::move(serialized_data)](std::string& out) {
+       	out.append(data); // 1 bulk copy, 0 string loops
+   	};
+   	return col;
+}
+
 // Builds a String column from `values` (copied/moved in): each row is
 // VarUInt-length-prefixed bytes, ClickHouse type "String".
 inline Column makeStringColumn(seastar::sstring name, std::vector<seastar::sstring>& values) {

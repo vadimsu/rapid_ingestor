@@ -30,8 +30,6 @@
 #include "rapid_ingestor_config.hh"
 #include "rapid_ingestor_message_parser.hh"
 
-#define not_yet 0
-
 namespace RapidIngestor {
 
 enum class SinkMode { RawText, TagMap, DynamicType, NativeJson };
@@ -61,9 +59,12 @@ inline void encodeValueAsJson(std::string& out, const MsgPackElement& elem) {
 			jsonEscapeInto(out, elem.val);
 			out.push_back('"');
 			break;
-		case MsgPackType::Integer:
-			out += std::to_string(elem.as_int());
+		case MsgPackType::Integer:{
+			char buf[24];
+            auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), elem.as_int());
+            out.append(buf, ptr - buf);
 			break;
+		}
 		case MsgPackType::Map: {
 			out.push_back('{');
 			StackLogFrame nested = parse_msgpack_map_zero_copy(elem.val);
@@ -88,9 +89,12 @@ inline void encodeValueAsJson(std::string& out, const MsgPackElement& elem) {
 // serialization" the mode is meant to provide.
 inline void encodeValueAsFlatText(std::string& out, const MsgPackElement& elem) {
 	switch (elem.type) {
-		case MsgPackType::Integer:
-			out += std::to_string(elem.as_int());
-			break;
+		case MsgPackType::Integer:{
+			char buf[24];
+            auto [ptr, ec] = std::to_chars(buf, buf + sizeof(buf), elem.as_int());
+            out.append(buf, ptr - buf);
+            break;
+		}
 		case MsgPackType::Map: {
 			out.push_back('{');
 			StackLogFrame nested = parse_msgpack_map_zero_copy(elem.val);
@@ -130,15 +134,13 @@ inline std::string encodeRecordJson(const StackLogFrame& frame) {
 
 // Encodes a full record as flat "key=value,key2=value2" text. Used by
 // raw_text mode.
-inline std::string encodeRecordFlatText(const StackLogFrame& frame) {
-	std::string out;
+inline void encodeRecordFlatText(std::string& out, const StackLogFrame& frame) {
 	for (size_t i = 0; i < frame.count; ++i) {
 		if (i) out.push_back(',');
 		out.append(frame.elements[i].key.data(), frame.elements[i].key.size());
 		out.push_back('=');
 		detail::encodeValueAsFlatText(out, frame.elements[i]);
 	}
-	return out;
 }
 
 // Bulk-inserts parsed Forward-protocol records into ClickHouse over the
@@ -153,7 +155,14 @@ public:
 		, _port(seastar::to_sstring(config.port))
 		, _dbname(config.dbname)
 		, _username(config.username)
-		, _password(config.password) {
+		, _password(config.password)
+		, _maxBatchBytes(config.max_batch_bytes)
+		, _backpressurePauseBytes(config.backpressure_pause_bytes)
+		, _backpressureResumeBytes(config.backpressure_resume_bytes)
+		, _pendingRows(0)
+		, _pendingBytes(0) {
+			_payloadColumnData = seastar::sstring();
+			_payloadColumnData.reserve(_maxBatchBytes + 65536);
 	}
 
 	// Connects, creates the landing table if needed, and adds the per-mode
@@ -161,12 +170,10 @@ public:
 	seastar::future<> start() {
 		_conn = co_await ClickHouseNative::ClickHouseNativeConnection::connect(_host, _port, _dbname, _username, _password);
 		fmt::print("Clickhouse connection established\n");
-#if 1
+
 		co_await _conn->executeQuery(fmt::format(
 			"CREATE TABLE IF NOT EXISTS {} (payload String) ENGINE = MergeTree() ORDER BY (payload)",
 			_table));
-#else
-#endif
 		fmt::print("clickhouse table created\n");
 		switch (_mode) {
 			case SinkMode::RawText:
@@ -202,6 +209,7 @@ public:
 
 	seastar::future<> stop() {
 		_flushTimer.cancel();
+		_capacityAvailable.broadcast();
 		co_await flush();
 		if (_conn) {
 			co_await _conn->close();
@@ -214,33 +222,37 @@ public:
 	// returns immediately. `frame`'s string_views must not be retained past
 	// this call - they point into transient parser buffers.
 	void add(std::string_view tag, const StackLogFrame& frame) {
-#if no_yet
-		std::string payload = (_mode == SinkMode::RawText) ? encodeRecordFlatText(frame) : encodeRecordJson(frame);
-		uint64_t ts_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-			std::chrono::system_clock::now().time_since_epoch()).count();
-		_pendingBytes += tag.size() + payload.size();
-		_pendingTags.emplace_back(tag.data(), tag.size());
-		_pendingTimestamps.push_back(ts_ns);
-#else
-		seastar::sstring payload;
+		_scratchBuffer.clear();
 		if (_mode == SinkMode::RawText){
-			std::string flat = encodeRecordFlatText(frame);
-			payload = seastar::sstring(flat.data(), flat.size());
-			_pendingBytes += payload.size();
+			encodeRecordFlatText(_scratchBuffer, frame);
 		}else{
 			fmt::print("mode not supported {}\n",static_cast<int>(_mode));
 			return;
 		}
-#endif
-		_pendingPayloads.emplace_back(payload.data(), payload.size());
-		if (_pendingTags.size() >= kMaxBatchRows || _pendingBytes >= kMaxBatchBytes) {
+		ClickHouseNative::putVarUInt(_payloadColumnData, _scratchBuffer.size());
+        _payloadColumnData.append(_scratchBuffer);
+		_pendingRows++;
+		_pendingBytes += _scratchBuffer.size();
+		if (_pendingBytes >= _maxBatchBytes) {
 			(void)flush();
 		}
 	}
 
+	bool isOverloaded() const {
+		return _pendingBytes >= _backpressurePauseBytes;
+	}
+
+	seastar::future<> waitForCapacity() {
+		(void)flush();
+		co_await _capacityAvailable.wait([this] {
+			return _pendingBytes < _backpressureResumeBytes;
+		});
+	}
+
 private:
-	static constexpr size_t kMaxBatchRows = 10000;
-	static constexpr size_t kMaxBatchBytes = 10ull * 1024 * 1024;
+	size_t _maxBatchBytes = 10ull * 1024 * 1024;
+	size_t _backpressurePauseBytes = 8ull * 1024 * 1024;
+	size_t _backpressureResumeBytes = 4ull * 1024 * 1024;
 	static constexpr std::chrono::milliseconds kFlushInterval{1000};
 
 	seastar::future<> flush() {
@@ -252,36 +264,28 @@ private:
 			co_return;
 		}
 		ClickHouseNative::ColumnBatch batch;
-#if not_yet
-		if (_pendingTags.empty() || !_conn) {
+		batch.rows = _pendingRows;
+
+		std::string column_data = std::move(_payloadColumnData);
+
+		if (!_conn){
 			co_return;
 		}
-		batch.rows = _pendingTags.size();
-#endif
-#if not_yet
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("tag", std::move(_pendingTags)));
-		batch.columns.push_back(ClickHouseNative::makeUInt64Column("ts", "UInt64", std::move(_pendingTimestamps)));
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", std::move(_pendingPayloads)));
-#else
-		if (_pendingPayloads.empty() || !_conn){
-			co_return;
-		}
-		batch.rows = _pendingPayloads.size();
-		batch.columns.push_back(ClickHouseNative::makeStringColumn("payload", _pendingPayloads));
-#endif
-		size_t rows = batch.rows;
-		_pendingTags.clear();
-		_pendingTimestamps.clear();
-		_pendingPayloads.clear();
-		_pendingBytes = 0;
+		_payloadColumnData = std::string();
+    	_payloadColumnData.reserve(_maxBatchBytes + 65536); // Pre-allocate!
+    	_pendingRows = 0;
+		batch.columns.push_back(ClickHouseNative::makePrebakedStringColumn("payload", std::move(column_data)));
+
 		auto table = _table;
 		_flushInProgress = true;
-		co_await _conn->insertRows(_table, std::move(batch)).then([this, rows] {
+		_capacityAvailable.broadcast();
+		co_await _conn->insertRows(_table, std::move(batch)).then([this, rows=batch.rows] {
 			_rowsInserted += rows;
 		}).handle_exception([table] (std::exception_ptr ep) {
 			fmt::print("ClickHouse sink: insert into {} failed: {}\n", table, ep);
 			return seastar::make_ready_future<>();
 		});
+		_pendingBytes = 0;//after as it serves backpressure
 		_flushInProgress = false;
 	}
 
@@ -294,13 +298,14 @@ private:
 	seastar::sstring _password;
 	seastar::lw_shared_ptr<ClickHouseNative::ClickHouseNativeConnection> _conn;
 
-	std::vector<seastar::sstring> _pendingTags;
-	std::vector<uint64_t> _pendingTimestamps;
-	std::vector<seastar::sstring> _pendingPayloads;
+	std::string _payloadColumnData;
+    std::string _scratchBuffer;
+	size_t _pendingRows = 0;
 	size_t _pendingBytes = 0;
 	seastar::timer<> _flushTimer;
 	uint64_t _rowsInserted = 0;
 	bool _flushInProgress = false;
+	seastar::condition_variable _capacityAvailable;
 };
 
 } // namespace RapidIngestor

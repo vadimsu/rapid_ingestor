@@ -23,6 +23,12 @@ namespace RapidIngestor{
 			seastar::future<> stop();
 			RapidIngestorStats& getStats();
 			void setSink(ProtocolEngine::RecordSink sink) { _protocolEngine.setSink(std::move(sink)); }
+			using IsOverloaded = std::function<bool()>;
+			using WaitForCapacity = std::function<seastar::future<>()>;
+			void setBackpressure(IsOverloaded isOverloaded, WaitForCapacity waitForCapacity) {
+				_isOverloaded = std::move(isOverloaded);
+				_waitForCapacity = std::move(waitForCapacity);
+			}
 		private:
 			void process_accumulated_bytes();
 			seastar::socket_address _addr;
@@ -31,6 +37,8 @@ namespace RapidIngestor{
 			Listener* _listener;
 			RapidIngestorStats _stats;
 			bool _fatal_error = false;
+			IsOverloaded _isOverloaded;
+			WaitForCapacity _waitForCapacity;
 	};
 }
 

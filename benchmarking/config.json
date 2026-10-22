@@ -20,7 +20,10 @@
 			"port":9000,
 			"dbname":"events",
 			"username":"default",
-			"password":"default"
+			"password":"default",
+			"max_batch_bytes":1000000,
+			"backpressure_pause_bytes":9000000,
+			"backpressure_resume_bytes":"500000"
 		}
 	]
 }
