@@ -21,9 +21,9 @@
 			"dbname":"events",
 			"username":"default",
 			"password":"default",
-			"max_batch_bytes":1000000,
-			"backpressure_pause_bytes":9000000,
-			"backpressure_resume_bytes":"500000"
+			"max_batch_bytes":104857600,
+			"backpressure_pause_bytes":2097152000,
+			"backpressure_resume_bytes":104857600
 		}
 	]
 }
