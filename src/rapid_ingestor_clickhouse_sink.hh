@@ -161,8 +161,12 @@ public:
 		, _backpressureResumeBytes(config.backpressure_resume_bytes)
 		, _pendingRows(0)
 		, _pendingBytes(0) {
-			_payloadColumnData = seastar::sstring();
-			_payloadColumnData.reserve(_maxBatchBytes + 65536);
+			_payloadColumnDataIdx = 0;
+			_payloadColumnData[0] = seastar::sstring();
+			_payloadColumnData[0].reserve(_maxBatchBytes + 65536);
+			_payloadColumnData[1] = seastar::sstring();
+			_payloadColumnData[1].reserve(_maxBatchBytes + 65536);
+			_scratchBuffer.reserve(65536);
 	}
 
 	// Connects, creates the landing table if needed, and adds the per-mode
@@ -230,8 +234,8 @@ public:
 			return;
 		}
 		auto size = _scratchBuffer.size();
-		ClickHouseNative::putVarUInt(_payloadColumnData, _scratchBuffer.size());
-	        _payloadColumnData.append(std::move(_scratchBuffer));
+		ClickHouseNative::putVarUInt(_payloadColumnData[_payloadColumnDataIdx], _scratchBuffer.size());
+	        _payloadColumnData[_payloadColumnDataIdx].append(std::move(_scratchBuffer));
 		_pendingRows++;
 		_pendingBytes += size;
 		if (_pendingBytes >= _maxBatchBytes) {
@@ -264,17 +268,18 @@ private:
 		if (_flushInProgress) {
 			co_return;
 		}
-		ClickHouseNative::ColumnBatch batch;
-		batch.rows = _pendingRows;
-		std::string column_data = std::move(_payloadColumnData);
-
 		if (!_conn){
 			co_return;
 		}
-		_payloadColumnData = std::string();
-		_payloadColumnData.reserve(_maxBatchBytes + 65536); // Pre-allocate!
+
+		ClickHouseNative::ColumnBatch batch;
+		batch.rows = _pendingRows;
+		auto idx = _payloadColumnDataIdx;
+		_payloadColumnDataIdx = 1 - _payloadColumnDataIdx;
+		_payloadColumnData[_payloadColumnDataIdx].clear();
+
 		_pendingRows = 0;
-		batch.columns.push_back(ClickHouseNative::makePrebakedStringColumn("payload", std::move(column_data)));
+		batch.columns.push_back(ClickHouseNative::makePrebakedStringColumn("payload", std::move(_payloadColumnData[idx])));
 
 		auto table = _table;
 		_flushInProgress = true;
@@ -297,8 +302,8 @@ private:
 	seastar::sstring _username;
 	seastar::sstring _password;
 	seastar::lw_shared_ptr<ClickHouseNative::ClickHouseNativeConnection> _conn;
-
-	std::string _payloadColumnData;
+	std::string _payloadColumnData[2];
+	int _payloadColumnDataIdx;
 	std::string _scratchBuffer;
 	size_t _pendingRows = 0;
 	size_t _pendingBytes = 0;

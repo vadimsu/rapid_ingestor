@@ -161,6 +161,22 @@ struct Column {
 	seastar::sstring type;
 	size_t encoded_size = 0; // bytes encode() will append - precomputed so the caller can reserve() once
 	std::function<void(std::string&)> encode;
+	Column(): encoded_size(0){}
+	Column(const Column&) = delete;
+	Column& operator=(const Column&) = delete;
+	Column(Column&& other){
+		name = std::move(other.name);
+		type = std::move(other.type);
+		encoded_size = other.encoded_size;
+		encode = other.encode;
+	}
+	Column& operator=(Column&& other){
+		name = std::move(other.name);
+		type = std::move(other.type);
+		encoded_size = other.encoded_size;
+		encode = other.encode;
+		return *this;
+	}
 };
 
 // Columnar batch of an arbitrary, caller-defined set of columns, built once
@@ -171,6 +187,18 @@ struct ColumnBatch {
 	size_t rows = 0;
 
 	bool empty() const { return rows == 0; }
+	ColumnBatch(): rows(0){}
+	ColumnBatch(const ColumnBatch&) = delete;
+	ColumnBatch& operator=(const ColumnBatch&) = delete;
+	ColumnBatch(ColumnBatch&& other){
+		columns.swap(other.columns);
+		rows = other.rows;
+	}
+	ColumnBatch& operator=(ColumnBatch&& other){
+		columns.swap(other.columns);
+		rows = other.rows;
+		return *this;
+	}
 };
 
 inline Column makePrebakedStringColumn(seastar::sstring&& name, std::string&& serialized_data) {
