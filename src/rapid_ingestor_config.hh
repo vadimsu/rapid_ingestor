@@ -50,6 +50,9 @@ namespace RapidIngestor{
 		seastar::sstring dbname = "default";
 		seastar::sstring username = "default";
 		seastar::sstring password;
+		size_t max_batch_bytes;
+		size_t backpressure_pause_bytes;
+		size_t backpressure_resume_bytes;
 	};
 	class Sinks{
 		public:
@@ -206,8 +209,20 @@ namespace RapidIngestor{
 						std::string password = to_string(*password_it);
 						sink.password = password.substr(1, password.size() - 2);
 					}
+					auto max_batch_bytes_it = it->find("max_batch_bytes");
+					if (max_batch_bytes_it != it->end()){
+						sink.max_batch_bytes = max_batch_bytes_it->get<size_t>();
+					}
+					auto backpressure_pause_bytes_it = it->find("backpressure_pause_bytes");
+					if (backpressure_pause_bytes_it != it->end()){
+						sink.backpressure_pause_bytes = backpressure_pause_bytes_it->get<size_t>();
+					}
+					auto backpressure_resume_bytes_it = it->find("backpressure_resume_bytes");
+					if (backpressure_resume_bytes_it != it->end()){
+						sink.backpressure_resume_bytes = backpressure_resume_bytes_it->get<size_t>();
+					}
 
-					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port);
+					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {} max_batch_bytes {} backpressure_pause_bytes {} backpressure_resume_bytes {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port, sink.max_batch_bytes, sink.backpressure_pause_bytes, sink.backpressure_resume_bytes);
 					_sinks.addSink(sink);
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);

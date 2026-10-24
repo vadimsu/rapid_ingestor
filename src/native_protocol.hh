@@ -161,6 +161,22 @@ struct Column {
 	seastar::sstring type;
 	size_t encoded_size = 0; // bytes encode() will append - precomputed so the caller can reserve() once
 	std::function<void(std::string&)> encode;
+	Column(): encoded_size(0){}
+	Column(const Column&) = delete;
+	Column& operator=(const Column&) = delete;
+	Column(Column&& other){
+		name = std::move(other.name);
+		type = std::move(other.type);
+		encoded_size = other.encoded_size;
+		encode = other.encode;
+	}
+	Column& operator=(Column&& other){
+		name = std::move(other.name);
+		type = std::move(other.type);
+		encoded_size = other.encoded_size;
+		encode = other.encode;
+		return *this;
+	}
 };
 
 // Columnar batch of an arbitrary, caller-defined set of columns, built once
@@ -171,7 +187,30 @@ struct ColumnBatch {
 	size_t rows = 0;
 
 	bool empty() const { return rows == 0; }
+	ColumnBatch(): rows(0){}
+	ColumnBatch(const ColumnBatch&) = delete;
+	ColumnBatch& operator=(const ColumnBatch&) = delete;
+	ColumnBatch(ColumnBatch&& other){
+		columns.swap(other.columns);
+		rows = other.rows;
+	}
+	ColumnBatch& operator=(ColumnBatch&& other){
+		columns.swap(other.columns);
+		rows = other.rows;
+		return *this;
+	}
 };
+
+inline Column makePrebakedStringColumn(seastar::sstring&& name, std::string&& serialized_data) {
+   	Column col;
+   	col.name = std::move(name);
+   	col.type = seastar::sstring("String");
+   	col.encoded_size = serialized_data.size();
+   	col.encode = [data = std::move(serialized_data)](std::string& out) {
+		out.append(data); // 1 bulk copy, 0 string loops
+   	};
+   	return col;
+}
 
 // Builds a String column from `values` (copied/moved in): each row is
 // VarUInt-length-prefixed bytes, ClickHouse type "String".
@@ -277,11 +316,11 @@ public:
 	// Block sent for it, in order - this generalizes what used to be a
 	// hardcoded (event UInt64, payload String) shape to whatever columns the
 	// caller built with makeStringColumn()/makeUInt64Column().
-	seastar::future<> insertRows(seastar::sstring table, ColumnBatch batch) {
+	seastar::future<> insertRows(seastar::sstring& table, ColumnBatch&& batch) {
 		if (batch.empty()) {
 			co_return;
 		}
-		std::string queryText = "INSERT INTO " + table + " (";
+		std::string queryText = "INSERT INTO " + std::move(table) + " (";
 		for (size_t i = 0; i < batch.columns.size(); ++i) {
 			if (i) {
 				queryText += ", ";

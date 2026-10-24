@@ -402,6 +402,7 @@ public:
     }
 
     uint64_t getElementCount() { return _eventsCount; }
+    uint64_t getUnparsedBufferSize() { return _packet_chain.len(); }
 
     // Invoked synchronously (before any co_await) once per fully-parsed
     // record. Callees must copy out whatever they need before returning -
