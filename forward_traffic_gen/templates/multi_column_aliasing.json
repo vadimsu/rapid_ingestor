@@ -1,0 +1,10 @@
+{
+	"_comment":"Matches benchmarking/config_multi_column_aliasing.json's explicit 'columns' schema (source field names lvl/msg/dur/ok, aliased server-side to level/message/duration_ms/succeeded) - every field here is a plain msgpack string/integer/bool matching its column type, no encoding coercion needed.",
+	"tag":"bench.multi_column_aliasing",
+	"fields":[
+		{ "name":"lvl", "type":"string", "values":["debug","info","warn","error"] },
+		{ "name":"msg", "type":"string", "size":24 },
+		{ "name":"dur", "type":"int64", "min":1, "max":5000 },
+		{ "name":"ok", "type":"bool" }
+	]
+}

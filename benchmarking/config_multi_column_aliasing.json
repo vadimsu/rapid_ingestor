@@ -1,0 +1,31 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"24224",
+			"ip":"127.0.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"multicolumn_aliasing_events",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_batch_bytes":8000000,
+			"backpressure_pause_bytes":80000000,
+			"backpressure_resume_bytes":70000000,
+
+			"_comment":"Multi-column mode focused purely on explicit aliasing: every 'source' field name (as produced by the upstream client) differs from its 'target_column' ClickHouse name, so the landing table can use whatever naming convention it wants regardless of the input schema. No 'encoding' is needed here since every field is already a plain msgpack string/integer matching its column type.",
+			"columns":[
+				{ "source":"lvl", "target_column":"level", "type":"string" },
+				{ "source":"msg", "target_column":"message", "type":"string" },
+				{ "source":"dur", "target_column":"duration_ms", "type":"int64" },
+				{ "source":"ok", "target_column":"succeeded", "type":"bool" }
+			]
+		}
+	]
+}

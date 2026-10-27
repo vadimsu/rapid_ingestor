@@ -7,6 +7,7 @@ find_package (Seastar REQUIRED)
 
 include_directories(
         ../seastar/include
+        ../json/include
 )
 
 add_executable (

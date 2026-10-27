@@ -1,0 +1,15 @@
+{
+	"_comment":"Matches benchmarking/config_single_column_json.json: single-column mode renders the whole record as one JSON-text column (plus a server-side 'fields Map(String,String)' projection), so field names/types don't drive any ClickHouse schema - same realistic record shape as single_column_text.json, just exercising the JSON encoding/projection path instead of flat text.",
+	"tag":"bench.single_column_json",
+	"fields":[
+		{ "name":"level", "type":"string", "values":["debug","info","warn","error"] },
+		{ "name":"message", "type":"string", "size":24 },
+		{ "name":"request_id", "type":"string", "size":16 },
+		{ "name":"duration_ms", "type":"int64", "min":1, "max":5000 },
+		{ "name":"success", "type":"bool" },
+		{ "name":"ctx", "type":"map", "fields":[
+			{ "name":"user", "type":"string", "values":["alice","bob","carol"] },
+			{ "name":"ip", "type":"string", "size":15 }
+		]}
+	]
+}

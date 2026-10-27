@@ -1,0 +1,35 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"24224",
+			"ip":"127.0.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"multicolumn_events",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_batch_bytes":8000000,
+			"backpressure_pause_bytes":80000000,
+			"backpressure_resume_bytes":70000000,
+
+			"_comment_single_column_mode":"target_column/encoding below only apply when 'columns' is absent/empty (single whole-record column mode).",
+			"target_column":"payload",
+			"encoding":"json",
+
+			"_comment_multi_column_mode":"when 'columns' is non-empty, the sink switches to multi-column/superset-schema mode: the incoming record is expected to be a superset of this schema. 'source' is the field name looked up in the record, 'target_column' is the ClickHouse column it's written to (defaults to 'source' when omitted - i.e. no aliasing). 'type' is one of string|int64|bool. 'encoding' (text|json, default json) only applies to 'string' columns and controls how a non-string source value is coerced to text.",
+			"columns":[
+				{ "source":"level", "target_column":"level", "type":"string" },
+				{ "source":"duration_ms", "target_column":"duration_ms", "type":"int64" },
+				{ "source":"success", "target_column":"ok", "type":"bool" },
+				{ "source":"ctx", "target_column":"context_json", "type":"string", "encoding":"json" }
+			]
+		}
+	]
+}

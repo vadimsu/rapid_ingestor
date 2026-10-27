@@ -1,0 +1,13 @@
+{
+	"_comment":"Matches benchmarking/config_multi_column.json's explicit 'columns' schema (source field names level/duration_ms/success/ctx must line up exactly for the sink's superset-schema lookup to find them) - level is a string column, duration_ms an Int64 column, success a Bool column, and ctx a String column fed from a nested map so the sink's JSON-encoding-of-non-string-values path gets exercised.",
+	"tag":"bench.multi_column",
+	"fields":[
+		{ "name":"level", "type":"string", "values":["debug","info","warn","error"] },
+		{ "name":"duration_ms", "type":"int64", "min":1, "max":5000 },
+		{ "name":"success", "type":"bool" },
+		{ "name":"ctx", "type":"map", "fields":[
+			{ "name":"user", "type":"string", "values":["alice","bob","carol"] },
+			{ "name":"ip", "type":"string", "size":15 }
+		]}
+	]
+}

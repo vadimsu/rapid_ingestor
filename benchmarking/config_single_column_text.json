@@ -9,7 +9,7 @@
 	"sinks":[
 		{
 			"database_type":"clickhouse",
-			"database_table":"events",
+			"database_table":"singlecolumn_text_events",
 			"host":"127.0.0.1",
 			"port":9000,
 			"dbname":"events",
