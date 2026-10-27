@@ -1,0 +1,28 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"24224",
+			"ip":"127.0.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"events",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_batch_bytes":8000000,
+			"backpressure_pause_bytes":800000000,
+			"backpressure_resume_bytes":700000000,
+
+			"_comment":"Single-column mode (no 'columns' array): the whole record is serialized into one ClickHouse String column. 'mode':'raw_text' plus explicit 'encoding':'text' renders it as flat 'key=value,key2=value2' text (nested maps as '{k=v;k2=v2}'), no server-side materialized projection. 'target_column' renames that column from the default 'payload' to 'log_line'.",
+			"mode":"raw_text",
+			"target_column":"log_line",
+			"encoding":"text"
+		}
+	]
+}

@@ -1,0 +1,28 @@
+{
+	"sources":[
+		{
+			"protocol":"TCP",
+			"port":"24224",
+			"ip":"127.0.0.1"
+		}
+	],
+	"sinks":[
+		{
+			"database_type":"clickhouse",
+			"database_table":"events",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_batch_bytes":8000000,
+			"backpressure_pause_bytes":80000000,
+			"backpressure_resume_bytes":70000000,
+
+			"_comment":"Single-column mode (no 'columns' array) with a JSON-shaped target column: 'mode':'tag_map' adds a server-side 'fields Map(String, String) MATERIALIZED JSONExtract(doc, ...)' projection over 'target_column' ('doc' here instead of the default 'payload'). 'encoding':'json' makes the column itself hold JSON text so the projection is well-formed; it defaults to 'json' automatically whenever 'mode' isn't 'raw_text', so it could also be omitted here.",
+			"mode":"tag_map",
+			"target_column":"doc",
+			"encoding":"json"
+		}
+	]
+}

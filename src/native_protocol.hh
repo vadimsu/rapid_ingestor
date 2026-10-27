@@ -100,11 +100,24 @@ inline void putString(std::string& out, const seastar::sstring& s) {
 	out.append(s.data(), s.size());
 }
 
+// Overload for callers holding a plain string_view (e.g. a zero-copy
+// MsgPackElement::val) - avoids an intermediate seastar::sstring allocation.
+inline void putString(std::string& out, std::string_view s) {
+	putVarUInt(out, s.size());
+	out.append(s.data(), s.size());
+}
+
 inline void putUInt64(std::string& out, uint64_t v) {
 	for (int i = 0; i < 8; ++i) {
 		out.push_back(static_cast<char>(v & 0xff));
 		v >>= 8;
 	}
+}
+
+// ClickHouse's Int64 native wire representation is the same 8-byte
+// little-endian layout as UInt64 - only the SQL type name differs.
+inline void putInt64(std::string& out, int64_t v) {
+	putUInt64(out, static_cast<uint64_t>(v));
 }
 
 inline void putInt32(std::string& out, int32_t v) {
@@ -201,15 +214,35 @@ struct ColumnBatch {
 	}
 };
 
-inline Column makePrebakedStringColumn(seastar::sstring&& name, std::string&& serialized_data) {
+// Builds a column whose values are already wire-encoded verbatim in
+// `serialized_data` (e.g. VarUInt-length-prefixed strings, or fixed-width
+// Int64/UInt8 values) - just hands the buffer off to the Block encoder with
+// no further per-row encoding work. Used by ClickHouseSink's double-buffered
+// per-column encoding, where each column's bytes are built up incrementally
+// as rows are added rather than from a std::vector<T> of values.
+inline Column makePrebakedRawColumn(seastar::sstring&& name, seastar::sstring&& type, std::string&& serialized_data) {
    	Column col;
    	col.name = std::move(name);
-   	col.type = seastar::sstring("String");
+   	col.type = std::move(type);
    	col.encoded_size = serialized_data.size();
    	col.encode = [data = std::move(serialized_data)](std::string& out) {
 		out.append(data); // 1 bulk copy, 0 string loops
    	};
    	return col;
+}
+
+inline Column makePrebakedStringColumn(seastar::sstring&& name, std::string&& serialized_data) {
+	return makePrebakedRawColumn(std::move(name), seastar::sstring("String"), std::move(serialized_data));
+}
+
+// `type` must be a fixed-width 8-byte integer ClickHouse type whose native
+// wire layout is plain little-endian (Int64, UInt64, ...).
+inline Column makePrebakedIntColumn(seastar::sstring&& name, seastar::sstring type, std::string&& serialized_data) {
+	return makePrebakedRawColumn(std::move(name), std::move(type), std::move(serialized_data));
+}
+
+inline Column makePrebakedBoolColumn(seastar::sstring&& name, std::string&& serialized_data) {
+	return makePrebakedRawColumn(std::move(name), seastar::sstring("UInt8"), std::move(serialized_data));
 }
 
 // Builds a String column from `values` (copied/moved in): each row is

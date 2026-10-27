@@ -37,6 +37,20 @@ namespace RapidIngestor{
 		private:
 			std::vector<Source> _sources;
 	};
+	// One explicit mapping from a StackLogFrame field to a ClickHouse column,
+	// used by Sink::columns (multi-column / "superset schema" mode - see
+	// rapid_ingestor_clickhouse_sink.hh). `source` is the field name looked up
+	// in the incoming record; `target_column` is the ClickHouse column name
+	// it's written to (defaults to `source` when omitted, i.e. no aliasing).
+	// `type` is "string" | "int64" | "bool". `encoding` ("text" | "json")
+	// only applies to "string" columns and controls how a non-string field
+	// value is coerced into text; defaults to "json".
+	struct SinkColumn{
+		seastar::sstring source;
+		seastar::sstring target_column;
+		seastar::sstring type = "string";
+		seastar::sstring encoding;
+	};
 	struct Sink{
 		seastar::sstring database_type = "clickhouse";
 		seastar::sstring database_table;
@@ -44,6 +58,7 @@ namespace RapidIngestor{
 		// ClickHouse native-protocol connection + record serialization mode
 		// ("raw_text" | "tag_map" | "dynamic" | "json"); see
 		// rapid_ingestor_clickhouse_sink.hh for what each mode does.
+		// Only used when `columns` below is empty (single whole-record column).
 		seastar::sstring mode = "raw_text";
 		seastar::sstring host = "127.0.0.1";
 		uint16_t port = 9000;
@@ -53,6 +68,17 @@ namespace RapidIngestor{
 		size_t max_batch_bytes;
 		size_t backpressure_pause_bytes;
 		size_t backpressure_resume_bytes;
+		// Single-column (whole-record) mode: ClickHouse column name the
+		// serialized record is written to (replaces the previously hardcoded
+		// "payload"), and its text encoding ("text" | "json"; empty = derive
+		// from `mode`, i.e. raw_text -> text, everything else -> json).
+		seastar::sstring target_column = "payload";
+		seastar::sstring encoding = "text";
+		// Explicit column schema: when non-empty, switches the sink to
+		// multi-column mode - the input record's fields are a superset of
+		// this schema, one wire column is produced per entry below instead of
+		// a single serialized `target_column`.
+		std::vector<SinkColumn> columns;
 	};
 	class Sinks{
 		public:
@@ -183,6 +209,16 @@ namespace RapidIngestor{
 						std::string mode = to_string(*mode_it);
 						sink.mode = mode.substr(1, mode.size() - 2);
 					}
+					auto target_column_it = it->find("target_column");
+					if (target_column_it != it->end()){
+						std::string target_column = to_string(*target_column_it);
+						sink.target_column = target_column.substr(1, target_column.size() - 2);
+					}
+					auto encoding_it = it->find("encoding");
+					if (encoding_it != it->end()){
+						std::string encoding = to_string(*encoding_it);
+						sink.encoding = encoding.substr(1, encoding.size() - 2);
+					}
 					auto host_it = it->find("host");
 					if (host_it != it->end()){
 						std::string host = to_string(*host_it);
@@ -221,8 +257,38 @@ namespace RapidIngestor{
 					if (backpressure_resume_bytes_it != it->end()){
 						sink.backpressure_resume_bytes = backpressure_resume_bytes_it->get<size_t>();
 					}
+					auto columns_it = it->find("columns");
+					if (columns_it != it->end() && columns_it->is_array()){
+						for (auto col_it = columns_it->begin(); col_it != columns_it->end(); col_it++){
+							SinkColumn col;
+							auto source_it = col_it->find("source");
+							if (source_it != col_it->end()){
+								std::string source = to_string(*source_it);
+								col.source = source.substr(1, source.size() - 2);
+							}
+							auto col_target_it = col_it->find("target_column");
+							if (col_target_it != col_it->end()){
+								std::string col_target = to_string(*col_target_it);
+								col.target_column = col_target.substr(1, col_target.size() - 2);
+							} else {
+								col.target_column = col.source;
+							}
+							auto type_it = col_it->find("type");
+							if (type_it != col_it->end()){
+								std::string type = to_string(*type_it);
+								col.type = type.substr(1, type.size() - 2);
+							}
+							auto col_encoding_it = col_it->find("encoding");
+							if (col_encoding_it != col_it->end()){
+								std::string col_encoding = to_string(*col_encoding_it);
+								col.encoding = col_encoding.substr(1, col_encoding.size() - 2);
+							}
+							fmt::print("Sink column source {} target_column {} type {} encoding {}\n", col.source, col.target_column, col.type, col.encoding);
+							sink.columns.push_back(col);
+						}
+					}
 
-					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {} max_batch_bytes {} backpressure_pause_bytes {} backpressure_resume_bytes {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port, sink.max_batch_bytes, sink.backpressure_pause_bytes, sink.backpressure_resume_bytes);
+					fmt::print("Sink DB type {} table {} connection {} mode {} host {} port {} target_column {} encoding {} columns {} max_batch_bytes {} backpressure_pause_bytes {} backpressure_resume_bytes {}\n",db_type, db_table,db_connection, sink.mode, sink.host, sink.port, sink.target_column, sink.encoding, sink.columns.size(), sink.max_batch_bytes, sink.backpressure_pause_bytes, sink.backpressure_resume_bytes);
 					_sinks.addSink(sink);
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);

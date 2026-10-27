@@ -65,24 +65,34 @@ Memory management:
 
 Configuration:
 
-- JSON config file (see benchmarking/config.json) declares `sources` (protocol: TCP/UNIX, currently TLS is parsed but not implemented) and `sinks` (ClickHouse connection: database_type/database_table/mode/host/port/dbname/username/password)
+- JSON config file (see benchmarking/config.json) declares `sources` (protocol: TCP/UNIX, currently TLS is parsed but not implemented) and `sinks` (ClickHouse connection: database_type/database_table/mode/host/port/dbname/username/password/target_column/encoding/columns - see below)
+- Example sink configs under `benchmarking/`, one per mode:
+	- `config.json` / `config_vm_loopback.json` / `config_unixdomain.json` - default single-column `raw_text` mode (unchanged `payload` column)
+	- `config_single_column_text.json` - single-column mode with a renamed `target_column` and explicit flat-text `encoding`
+	- `config_single_column_json.json` - single-column mode with a renamed `target_column`, `tag_map`'s `Map(String, String)` projection, and explicit JSON `encoding`
+	- `config_multi_column.json` - multi-column/superset-schema mode mixing string/int64/bool columns, one aliased column, and JSON coercion of a nested-map field
+	- `config_multi_column_aliasing.json` - multi-column mode focused purely on explicit aliasing (every `source` field renamed to a differently-named `target_column`)
 - Only the first usable source and the first sink in the config are currently started; multiple concurrent sources/sinks are not yet wired up
 
 Output: ClickHouse sink (native TCP protocol):
 
-- `native_protocol.hh` is a minimal, reusable ClickHouse native-TCP-protocol client (handshake, `executeQuery` for DDL, a Block decoder, and `insertRows()` for an arbitrary ordered set of String/UInt64-typed columns)
+- `native_protocol.hh` is a minimal, reusable ClickHouse native-TCP-protocol client (handshake, `executeQuery` for DDL, a Block decoder, and `insertRows()` for an arbitrary ordered set of String/Int64/UInt8-typed columns)
 - One `ClickHouseSink` instance is created and connected per shard (its own `ClickHouseNativeConnection`, its own pending batch) - never shared across shards, consistent with the share-nothing model
-- Rather than hand-rolling native-wire encoders for ClickHouse's `Map`/`Variant`/`Dynamic`/`JSON` column types (high-risk, version-sensitive), every mode inserts into the same plain landing table - `tag String, ts UInt64, payload String` - using only wire types the client already understands, and lets ClickHouse DDL (a `MATERIALIZED` column) project `payload` into the fancier type server-side. Four serialization modes (`Sink::mode` in config.json) control what `payload` holds and what projection is added in `ClickHouseSink::start()`:
-	1. `raw_text` - simple flat `key=value,key2=value2` text, nested maps as `{k=v;k2=v2}`; no materialized column
-	2. `tag_map` - JSON object text; adds `fields Map(String, String) MATERIALIZED JSONExtract(payload, 'Map(String, String)')`
-	3. `dynamic` - JSON object text; adds `fields Map(String, Variant(String, Int64, Float64, UInt8)) MATERIALIZED JSONExtract(...)` (targets ClickHouse 24.8+, needs `allow_experimental_variant_type`)
-	4. `json` - JSON object text; adds `doc JSON MATERIALIZED payload` (targets ClickHouse 24.8+, needs `allow_experimental_json_type`)
+- Two insertion modes, selected by whether `Sink::columns` is configured:
+	- **Single-column mode** (default, `Sink::columns` empty): rather than hand-rolling native-wire encoders for ClickHouse's `Map`/`Variant`/`Dynamic`/`JSON` column types (high-risk, version-sensitive), every mode inserts the whole record into one plain `String` column - `Sink::target_column` (defaults to `payload`) - and lets ClickHouse DDL (a `MATERIALIZED` column) project it into the fancier type server-side. Four serialization modes (`Sink::mode`) control what the target column holds and what projection is added in `ClickHouseSink::start()`:
+		1. `raw_text` - simple flat `key=value,key2=value2` text, nested maps as `{k=v;k2=v2}`; no materialized column
+		2. `tag_map` - JSON object text; adds `fields Map(String, String) MATERIALIZED JSONExtract(<target_column>, 'Map(String, String)')`
+		3. `dynamic` - JSON object text; adds `fields Map(String, Variant(String, Int64, Float64, UInt8)) MATERIALIZED JSONExtract(...)` (targets ClickHouse 24.8+, needs `allow_experimental_variant_type`)
+		4. `json` - JSON object text; adds `doc JSON MATERIALIZED <target_column>` (targets ClickHouse 24.8+, needs `allow_experimental_json_type`)
+	  `Sink::encoding` (`text` | `json`) overrides the text format independently of `mode` (default: `text` for `raw_text`, `json` otherwise).
+	- **Multi-column / superset-schema mode** (`Sink::columns` non-empty): the incoming record is treated as a superset of an explicit column schema. Each `Sink::columns` entry maps one record field (`source`) onto one ClickHouse column (`target_column`, defaults to `source` - i.e. explicit aliasing when they differ) of a configured `type` (`string` | `int64` | `bool`). `ClickHouseSink::start()` creates the landing table directly from this schema (`CREATE TABLE ... ORDER BY tuple()`) instead of a single payload column. On every `add()`, exactly one value is written per configured column to keep row alignment: a missing field or a type mismatch writes that type's zero value (empty string / 0 / false); a present String-column field that isn't itself a msgpack string is coerced to text via `encoding` (`text` | `json`, default `json`). Extra fields in the record that aren't in the schema are simply ignored.
 - Records batch in memory per shard (row count / byte size thresholds, or a 1s timer) before a single `insertRows()` Block-encodes and sends them; a failed insert is logged and the batch is dropped (no retry/durability yet)
 - Known limitations: single global sink/mode (no per-tag routing to different tables/modes yet), no reconnect-on-drop, no backpressure between the sink falling behind and the receive path
 
+
 Current status / not yet implemented:
 
-- ClickHouse sink: implemented for all 4 modes, but no retry/reconnect on connection loss or insert failure, no per-tag routing to multiple tables/modes, no backpressure into the receive path
+- ClickHouse sink: implemented for all 4 single-column modes plus the multi-column/superset-schema mode, but no retry/reconnect on connection loss or insert failure, no per-tag routing to multiple tables/modes, no backpressure into the receive path
 - TLS listener support: not implemented (parsed from config, logged as unsupported)
 - Data manipulation plugins: none yet
 
