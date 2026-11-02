@@ -8,6 +8,12 @@
 // Example:
 //   ./bin/forward_traffic_gen --host 127.0.0.1 --port 24224 -c 4 \
 //       --connections 8 --entries-per-batch 20 --fields 6 --field-size 24
+//
+// Record shape is either the generic "fieldN" strings above, or - via
+// --template <file.json> - an explicit, named/typed field schema matching a
+// specific ClickHouse sink config variant (single-column text/json,
+// multi-column, multi-column with aliasing). See
+// forward_traffic_gen/templates/*.json and forward_template_loader.hh.
 #include <seastar/core/app-template.hh>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/sleep.hh>
@@ -21,6 +27,7 @@
 #include <chrono>
 #include <vector>
 #include "forward_msgpack_writer.hh"
+#include "forward_template_loader.hh"
 
 namespace bpo = boost::program_options;
 
@@ -57,12 +64,13 @@ public:
     }
 
     seastar::future<> run(seastar::socket_address target, seastar::sstring tag,
-                           unsigned connections, unsigned entries_per_batch, unsigned fields,
-                           unsigned field_size, uint64_t batches_limit, uint32_t rate_per_sec) {
+                           unsigned connections, unsigned entries_per_batch,
+                           std::vector<ForwardTrafficGen::FieldSpec> fields,
+                           uint64_t batches_limit, uint32_t rate_per_sec) {
         std::vector<seastar::future<>> conns;
         conns.reserve(connections);
         for (unsigned i = 0; i < connections; ++i) {
-            conns.push_back(run_connection(target, tag, entries_per_batch, fields, field_size,
+            conns.push_back(run_connection(target, tag, entries_per_batch, fields,
                                             batches_limit, rate_per_sec));
         }
         co_await seastar::when_all_succeed(std::move(conns));
@@ -70,9 +78,10 @@ public:
 
 private:
     seastar::future<> run_connection(seastar::socket_address target, seastar::sstring tag,
-                                      unsigned entries_per_batch, unsigned fields, unsigned field_size,
+                                      unsigned entries_per_batch,
+                                      const std::vector<ForwardTrafficGen::FieldSpec>& fields,
                                       uint64_t batches_limit, uint32_t rate_per_sec) {
-        auto tmpl = ForwardTrafficGen::build_forward_template(tag, entries_per_batch, fields, field_size);
+        auto tmpl = ForwardTrafficGen::build_forward_template(tag, entries_per_batch, fields);
         try {
             auto fd = co_await seastar::connect(target);
             auto out = fd.output();
@@ -117,8 +126,11 @@ int main(int argc, char** argv) {
         ("tag", bpo::value<seastar::sstring>()->default_value("bench.tag"), "Forward protocol tag")
         ("connections", bpo::value<unsigned>()->default_value(1), "concurrent connections per core")
         ("entries-per-batch", bpo::value<unsigned>()->default_value(10), "log entries per Forward message")
-        ("fields", bpo::value<unsigned>()->default_value(5), "string fields per record")
-        ("field-size", bpo::value<unsigned>()->default_value(16), "bytes per field value (clamped to 31)")
+        ("fields", bpo::value<unsigned>()->default_value(5), "string fields per record (ignored if --template is set)")
+        ("field-size", bpo::value<unsigned>()->default_value(16), "bytes per field value, clamped to 31 (ignored if --template is set)")
+        ("template", bpo::value<seastar::sstring>()->default_value({}),
+            "JSON file describing named/typed fields to generate (overrides --fields/--field-size); "
+            "see forward_traffic_gen/templates/*.json for per-ClickHouse-schema-variant examples")
         ("batches", bpo::value<uint64_t>()->default_value(0), "batches per connection, 0 = unlimited")
         ("duration", bpo::value<uint32_t>()->default_value(0), "seconds to run, 0 = unlimited")
         ("rate", bpo::value<uint32_t>()->default_value(0), "max batches/sec per connection, 0 = unlimited");
@@ -133,9 +145,23 @@ int main(int argc, char** argv) {
         auto entries_per_batch = cfg["entries-per-batch"].as<unsigned>();
         auto fields = cfg["fields"].as<unsigned>();
         auto field_size = std::min(cfg["field-size"].as<unsigned>(), 31u);
+        auto template_path = cfg["template"].as<seastar::sstring>();
         auto batches = cfg["batches"].as<uint64_t>();
         auto duration = cfg["duration"].as<uint32_t>();
         auto rate = cfg["rate"].as<uint32_t>();
+
+        std::vector<ForwardTrafficGen::FieldSpec> field_specs;
+        if (!template_path.empty()) {
+            auto loaded = ForwardTrafficGen::load_template(std::string(template_path));
+            field_specs = std::move(loaded.fields);
+            if (!loaded.tag.empty() && cfg["tag"].defaulted()) {
+                tag = seastar::sstring(loaded.tag);
+            }
+            fmt::print("loaded template '{}': {} field(s), tag='{}'\n",
+                std::string(template_path), field_specs.size(), tag);
+        } else {
+            field_specs = ForwardTrafficGen::make_generic_fields(fields, field_size);
+        }
 
         auto target = make_target_address(host, port, unix_path);
 
@@ -154,7 +180,7 @@ int main(int argc, char** argv) {
         stats_timer.arm_periodic(std::chrono::seconds(1));
 
         auto run_fut = workers->invoke_on_all(&Worker::run, target, tag, connections,
-                                               entries_per_batch, fields, field_size, batches, rate);
+                                               entries_per_batch, field_specs, batches, rate);
 
         if (duration > 0) {
             co_await seastar::sleep(std::chrono::seconds(duration));

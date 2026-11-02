@@ -65,6 +65,15 @@ StackLogFrame parse_msgpack_map_zero_copy(std::string_view raw_buffer) {
         } else if (*ptr == 0xD2) {
             elem.type = MsgPackType::Integer; ptr++;
             elem.val = std::string_view(reinterpret_cast<const char*>(ptr), 4); ptr += 4;
+        } else if (*ptr == 0xC2 || *ptr == 0xC3) {
+            // msgpack false/true (0xC2/0xC3): point val at a static 0/1 byte
+            // (safe to reference indefinitely) rather than the 0xC2/0xC3 byte
+            // itself, so callers can test val[0] != 0 directly.
+            static const char kFalseByte = 0x00;
+            static const char kTrueByte = 0x01;
+            elem.type = MsgPackType::Boolean;
+            elem.val = std::string_view(*ptr == 0xC3 ? &kTrueByte : &kFalseByte, 1);
+            ptr++;
         } else if ((*ptr & 0xF0) == 0x80) {
             elem.type = MsgPackType::Map;
             const uint8_t* start_map = ptr;
