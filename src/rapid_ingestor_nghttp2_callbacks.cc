@@ -39,6 +39,7 @@ int on_header(nghttp2_session* session, const nghttp2_frame* frame,
     std::string_view k(reinterpret_cast<const char*>(name), namelen);
     std::string_view v(reinterpret_cast<const char*>(value), valuelen);
 
+    fmt::print("{} {} {} {}\n",__FILE__,__LINE__,k,v);
     if (k == ":path") {
         if (v == "/opentelemetry.proto.collector.trace.v1.TraceService/Export") {
             stream->signal = OtlpSignal::Traces;
