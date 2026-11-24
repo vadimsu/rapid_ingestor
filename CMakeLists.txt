@@ -12,17 +12,25 @@ include(FindPkgConfig)
 include_directories(
         seastar/include
 	json/include
+	nghttp2/lib/includes
 )
 link_directories(
+	nghttp2/lib/.libs
 )
 
 add_executable (
         rapid_ingestor
+	src/rapid_ingestor_listener.cc
+	src/rapid_ingestor_forward_protocol.cc
+	src/rapid_ingestor_otel.cc
+	src/rapid_ingestor_nghttp2_callbacks.cc
+	src/rapid_ingestor_clickhouse_sink.cc
         src/rapid_ingestor.cc
 )
 
 target_link_libraries (
         rapid_ingestor
+	PRIVATE libnghttp2.a
 	PRIVATE ZLIB::ZLIB
         PRIVATE Seastar::seastar
         )

@@ -1,40 +1,10 @@
-#pragma once
 
 #include "rapid_ingestor_listener.hh"
 
 namespace RapidIngestor{
 
 seastar::future<RapidIngestorStats> Protocol::onAccepted(seastar::lw_shared_ptr<Connection> connection, Listener* listener){
-	_connection = connection;
-	_listener = listener;
-
-	return seastar::do_until([this, this_proto = this->shared_from_this()] {
-				return !_connection->isAlive() || _fatal_error;
-			},
-			[this, this_proto = this->shared_from_this()]{
-				auto do_receive = [this, this_proto]{
-					return _connection->receive().then([this] (seastar::temporary_buffer<char> tb){
-//							fmt::print("[DEBUG] {} received buffer size={}\n",_addr, tb.size());
-						_stats.bytesProcessed += tb.size();
-						_protocolEngine.append(std::move(tb));
-						process_accumulated_bytes();
-						// Keep the live count visible via getStats() while the
-						// connection is open, not just once it closes.
-						_stats.messagesParsed = _protocolEngine.getElementCount();
-						_stats.unparsedBufferSize = _protocolEngine.getUnparsedBufferSize();
-					});
-				};
-				if (_isOverloaded && _isOverloaded()) {
-					return _waitForCapacity().then(do_receive);
-				}
-				return do_receive();
-			}).then([this]{
-				return _listener->onProtocolDone(this->shared_from_this()).then([this_proto = this->shared_from_this()] {
-					this_proto->_stats.messagesParsed = this_proto->_protocolEngine.getElementCount();
-					this_proto->_stats.unparsedBufferSize = this_proto->_protocolEngine.getUnparsedBufferSize();
-					return seastar::make_ready_future<RapidIngestorStats>(this_proto->getStats());
-				});
-			});
+	_impl->onAccepted(connection, listener);
 }
 
 void Protocol::process_accumulated_bytes() {

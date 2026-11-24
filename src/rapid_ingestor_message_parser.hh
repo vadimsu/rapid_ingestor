@@ -47,7 +47,7 @@ struct StackLogFrame {
     }
 };
 
-StackLogFrame parse_msgpack_map_zero_copy(std::string_view raw_buffer) {
+static inline  StackLogFrame parse_msgpack_map_zero_copy(std::string_view raw_buffer) {
     StackLogFrame frame;
     const uint8_t* ptr = reinterpret_cast<const uint8_t*>(raw_buffer.data());
     const uint8_t* end = ptr + raw_buffer.size();

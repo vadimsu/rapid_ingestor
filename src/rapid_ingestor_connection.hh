@@ -44,6 +44,9 @@ namespace RapidIngestor{
 				auto buf = co_await  _in.read();
 				co_return buf;
 			}
+			seastar::future<> send(const char * buf, size_t len){
+				return seastar::make_ready_future<>();
+			}
 			bool isAlive() { return !_in.eof(); }
 			seastar::future<> stop() {
 				auto in_fut = _in.close();
