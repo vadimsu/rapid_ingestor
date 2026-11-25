@@ -28,6 +28,7 @@ class OtelProtocol : public IProtocol {
 		StreamCtx* create_stream(int32_t stream_id);
 		void dispatch_otlp_request(StreamCtx*);
 		void destroy_stream(int32_t stream_id);
+		seastar::temporary_buffer<char> getCurrentBuf() { return _current_buf.share(); }
 	private:
 		nghttp2_session_callbacks* init_h2_callbacks();
 
@@ -51,6 +52,7 @@ class OtelProtocol : public IProtocol {
 		seastar::gate _gate;
 		bool _closed = false;
 		std::unordered_map<int32_t, StreamCtx*> _streams;
+		seastar::temporary_buffer<char> _current_buf;
 };
 
 }

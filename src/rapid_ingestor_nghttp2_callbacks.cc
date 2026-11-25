@@ -57,13 +57,28 @@ int on_header(nghttp2_session* session, const nghttp2_frame* frame,
 // 3. Append incoming DATA frame chunks into the stream's receive buffer
 int on_data_chunk_recv(nghttp2_session* session, uint8_t /*flags*/,
                        int32_t stream_id, const uint8_t* data, size_t len,
-                       void* /*user_data*/) {
+                       void* user_data) {
+    auto* otelProtocol = static_cast<OtelProtocol*>(user_data);
     auto* stream = static_cast<StreamCtx*>(
         nghttp2_session_get_stream_user_data(session, stream_id));
-    if (!stream) return 0;
+    if (!stream || !otelProtocol) return 0;
+#if 0
 
+    fmt::print("{} {} {} {}\n",__FILE__,__func__,stream_id,len);
     // Optional: enforce a max payload cap (e.g., 16 MiB) and RST_STREAM if exceeded
     stream->recv_buf.append(reinterpret_cast<const char*>(data), len);
+    stream->total_bytes += len;
+#else
+    if (len == 0) return 0;
+    fmt::print("{} {} {} {}\n",__FILE__,__func__,stream_id,len);
+    // Compute offset inside the active Seastar temporary_buffer
+    auto* base = reinterpret_cast<const uint8_t*>(otelProtocol->getCurrentBuf().get());
+    size_t offset = static_cast<size_t>(data - base);
+
+    // Zero-copy ref-counted slice
+    stream->chunks.push_back(otelProtocol->getCurrentBuf().share(offset, len));
+    stream->total_bytes += len;
+#endif
     return 0;
 }
 

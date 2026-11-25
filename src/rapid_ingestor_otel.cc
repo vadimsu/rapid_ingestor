@@ -5,6 +5,7 @@
 #include "rapid_ingestor_listener.hh"
 #include "rapid_ingestor_otel.hh"
 #include "rapid_ingestor_nghttp2_callbacks.hh"
+#include "rapid_ingestor_grpc.hh"
 
 namespace RapidIngestor{
 
@@ -75,6 +76,10 @@ StreamCtx* OtelProtocol::create_stream(int32_t stream_id){
 }
 
 void OtelProtocol::dispatch_otlp_request(StreamCtx* ctx){
+	fmt::print("{} {} {} {}\n",__FILE__,__func__,__LINE__,ctx->total_bytes);
+	 GrpcHeaderResult grpcHeaderResult = parse_grpc_header(ctx->chunks, ctx->total_bytes);
+	 fmt::print("{} {} {} {} {}\n",(int)grpcHeaderResult.status, grpcHeaderResult.header.compressed, grpcHeaderResult.header.length, grpcHeaderResult.header.payload_chunk_idx, grpcHeaderResult.header.payload_offset);
+	 fmt::print("{} ",static_cast<const char*>(ctx->chunks[grpcHeaderResult.header.payload_chunk_idx].get() + grpcHeaderResult.header.payload_offset));
 }
 
 void OtelProtocol::destroy_stream(int32_t stream_id){
@@ -118,7 +123,7 @@ seastar::future<> OtelProtocol::read_loop() {
 		if (buf.empty()) {
 			break; // Peer closed TCP connection (EOF)
 		}
-	
+		_current_buf = buf.share();	
 		nghttp2_ssize rv = nghttp2_session_mem_recv2(
 			_session,
 			reinterpret_cast<const uint8_t*>(buf.get()),
