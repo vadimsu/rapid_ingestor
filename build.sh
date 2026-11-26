@@ -1,4 +1,7 @@
 #/bin/bash
+./reinstall_protoc.sh
+./generate_proto.sh
+./reinstall_absl.sh
 cd nghttp2
 git submodule update --init
 autoreconf -i

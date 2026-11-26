@@ -6,7 +6,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package (Seastar REQUIRED)
 find_package (Valgrind)
 find_package(ZLIB REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
+#find_package(Protobuf CONFIG REQUIRED)
 
 include(FindPkgConfig)
 
@@ -16,6 +16,7 @@ include_directories(
 	nghttp2/lib/includes
 	generated
 	opentelemetry-proto/gen/cpp
+	protobuf/src
 )
 link_directories(nghttp2/lib/.libs)
 
