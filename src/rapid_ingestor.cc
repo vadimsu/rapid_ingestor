@@ -43,11 +43,12 @@ int main(int argc, char **argv){
 					auto listener = new seastar::sharded<RapidIngestor::Listener>();
 					listeners.push_back(listener);
 					statsTimers.push_back(seastar::timer<>());
-					statsTimers[statsTimers.size()-1].set_callback([listener]{
-						get_all_stats(listener).then([](RapidIngestor::RapidIngestorStats stats){
+					statsTimers[statsTimers.size()-1].set_callback([listener, source=*src]{
+						get_all_stats(listener).then([source](RapidIngestor::RapidIngestorStats stats){
 							gMessagesProcessed += stats;
-							fmt::print("Total messages {} bytes {} rows inserted {} unparsed {} fatal errors {}\n",
-								stats.messagesParsed, stats.bytesProcessed, stats.rowsInserted, stats.unparsedBufferSize,stats.fatalErrors);
+							fmt::print("Listener {}:{} ({}) Total messages {} bytes {} rows inserted {} unparsed {} fatal errors {}\n",
+								source.ipaddr, source.port, source.protocol, stats.messagesParsed,
+								stats.bytesProcessed, stats.rowsInserted, stats.unparsedBufferSize,stats.fatalErrors);
 						});
 					});
 					statsTimers[statsTimers.size()-1].arm_periodic(std::chrono::seconds(1));

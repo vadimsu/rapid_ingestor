@@ -14,6 +14,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <exception>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <stdexcept>
@@ -39,6 +41,14 @@ enum class Signal { Traces, Metrics, Logs };
 struct Payload {
     std::string wire;
     size_t offset = 0;
+};
+
+struct ClientState {
+    int32_t stream_id = -1;
+    bool stream_closed = false;
+    uint32_t stream_error = 0;
+    bool grpc_status_received = false;
+    bool grpc_ok = false;
 };
 
 Signal parse_signal(const seastar::sstring& signal) {
@@ -151,6 +161,29 @@ nghttp2_ssize read_payload(
     return static_cast<nghttp2_ssize>(count);
 }
 
+int on_stream_close(
+    nghttp2_session*, int32_t stream_id, uint32_t error_code, void* user_data) {
+    auto* state = static_cast<ClientState*>(user_data);
+    if (stream_id == state->stream_id) {
+        state->stream_closed = true;
+        state->stream_error = error_code;
+    }
+    return 0;
+}
+
+int on_header(
+    nghttp2_session*, const nghttp2_frame* frame,
+    const uint8_t* name, size_t namelen, const uint8_t* value, size_t valuelen,
+    uint8_t, void* user_data) {
+    auto* state = static_cast<ClientState*>(user_data);
+    if (frame->hd.stream_id == state->stream_id &&
+        std::string_view(reinterpret_cast<const char*>(name), namelen) == "grpc-status") {
+        state->grpc_status_received = true;
+        state->grpc_ok = std::string_view(reinterpret_cast<const char*>(value), valuelen) == "0";
+    }
+    return 0;
+}
+
 class Worker {
 public:
     Stats get_stats() const { return _stats; }
@@ -171,11 +204,22 @@ private:
         seastar::socket_address target, Signal signal,
         uint64_t batches, uint32_t rate) {
         auto fd = co_await seastar::connect(target);
+        auto input = fd.input();
         auto output = fd.output();
         nghttp2_session* session = nullptr;
         nghttp2_session_callbacks* callbacks = nullptr;
-        nghttp2_session_callbacks_new(&callbacks);
-        nghttp2_session_client_new(&session, callbacks, nullptr);
+        ClientState client_state;
+        int rv = nghttp2_session_callbacks_new(&callbacks);
+        if (rv != 0) throw std::runtime_error(nghttp2_strerror(rv));
+        std::unique_ptr<nghttp2_session_callbacks, decltype(&nghttp2_session_callbacks_del)>
+            callbacks_guard(callbacks, nghttp2_session_callbacks_del);
+        nghttp2_session_callbacks_set_on_stream_close_callback(
+            callbacks, on_stream_close);
+        nghttp2_session_callbacks_set_on_header_callback(callbacks, on_header);
+        rv = nghttp2_session_client_new(&session, callbacks, &client_state);
+        if (rv != 0) throw std::runtime_error(nghttp2_strerror(rv));
+        std::unique_ptr<nghttp2_session, decltype(&nghttp2_session_del)>
+            session_guard(session, nghttp2_session_del);
         nghttp2_settings_entry settings[] = {
             {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 128}};
         nghttp2_submit_settings(session, NGHTTP2_FLAG_NONE, settings, 1);
@@ -198,34 +242,66 @@ private:
             : std::chrono::microseconds(1000000 / rate);
         auto next_tick = std::chrono::steady_clock::now();
 
-        for (uint64_t sent = 0; batches == 0 || sent < batches; ++sent) {
-            payload.offset = 0;
-            int32_t stream_id = nghttp2_submit_request2(
-                session, nullptr, headers.data(), headers.size(), &provider, nullptr);
-            if (stream_id < 0) {
-                throw std::runtime_error(nghttp2_strerror(stream_id));
-            }
+        std::exception_ptr failure;
+        try {
+            for (uint64_t sent = 0; batches == 0 || sent < batches; ++sent) {
+                payload.offset = 0;
+                client_state = {};
+                int32_t stream_id = nghttp2_submit_request2(
+                    session, nullptr, headers.data(), headers.size(), &provider, nullptr);
+                if (stream_id < 0) {
+                    throw std::runtime_error(nghttp2_strerror(stream_id));
+                }
+                client_state.stream_id = stream_id;
 
-            while (nghttp2_session_want_write(session)) {
-                const uint8_t* data = nullptr;
-                nghttp2_ssize length = nghttp2_session_mem_send2(session, &data);
-                if (length <= 0) break;
-                co_await output.write(reinterpret_cast<const char*>(data), length);
-                _stats.bytes += static_cast<uint64_t>(length);
-            }
-            co_await output.flush();
-            ++_stats.batches;
+                while (nghttp2_session_want_write(session)) {
+                    const uint8_t* data = nullptr;
+                    nghttp2_ssize length = nghttp2_session_mem_send2(session, &data);
+                    if (length < 0) throw std::runtime_error(nghttp2_strerror(length));
+                    if (length == 0) break;
+                    co_await output.write(reinterpret_cast<const char*>(data), length);
+                    _stats.bytes += static_cast<uint64_t>(length);
+                }
+                co_await output.flush();
+                while (!client_state.stream_closed) {
+                    auto response = co_await input.read();
+                    if (response.empty()) {
+                        throw std::runtime_error("server closed before gRPC response");
+                    }
+                    nghttp2_ssize consumed = nghttp2_session_mem_recv2(
+                        session,
+                        reinterpret_cast<const uint8_t*>(response.get()),
+                        response.size());
+                    if (consumed < 0) {
+                        throw std::runtime_error(nghttp2_strerror(consumed));
+                    }
+                }
+                if (client_state.stream_error != NGHTTP2_NO_ERROR ||
+                    !client_state.grpc_status_received || !client_state.grpc_ok) {
+                    throw std::runtime_error("server returned an unsuccessful gRPC response");
+                }
+                ++_stats.batches;
 
-            if (rate > 0) {
-                next_tick += interval;
-                auto now = std::chrono::steady_clock::now();
-                if (next_tick > now) co_await seastar::sleep(next_tick - now);
+                if (rate > 0) {
+                    next_tick += interval;
+                    auto now = std::chrono::steady_clock::now();
+                    if (next_tick > now) co_await seastar::sleep(next_tick - now);
+                }
             }
+        } catch (...) {
+            failure = std::current_exception();
         }
 
-        co_await output.close();
-        nghttp2_session_del(session);
-        nghttp2_session_callbacks_del(callbacks);
+        try {
+            co_await seastar::when_all_succeed(input.close(), output.close());
+        } catch (const std::exception& e) {
+            if (!failure) throw;
+            fmt::print(stderr, "Failed to close OTLP connection: {}\n", e.what());
+        } catch (...) {
+            if (!failure) throw;
+            fmt::print(stderr, "Failed to close OTLP connection: unknown error\n");
+        }
+        if (failure) std::rethrow_exception(failure);
     }
 
     Stats _stats;
@@ -261,9 +337,9 @@ int main(int argc, char** argv) {
             return workers->invoke_on_all(
                 [target, signal, connections, batches, rate](Worker& worker) {
                     return worker.run(target, signal, connections, batches, rate);
+                }).finally([workers] {
+                    return workers->stop().finally([workers] {});
                 });
-        }).then([workers] {
-            return workers->stop();
         });
     });
 }

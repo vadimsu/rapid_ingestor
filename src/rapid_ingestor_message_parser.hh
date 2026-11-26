@@ -7,6 +7,9 @@
 #include <bit>
 #include <vector>
 #include <functional>
+#if __cplusplus < 202302L
+#include <type_traits>
+#endif
 #include "zlib.h"
 
 namespace RapidIngestor {
@@ -23,6 +26,24 @@ constexpr size_t MAX_PACKED_BLOB_BYTES    = 64ull * 1024 * 1024;   // single Pac
 constexpr size_t MAX_DECOMPRESSED_BYTES   = 256ull * 1024 * 1024;  // zip-bomb guard
 constexpr size_t MAX_PENDING_BYTES        = 32ull * 1024 * 1024;   // unparsed backlog per connection
 
+#if __cplusplus < 202302L
+template <typename T>
+constexpr T byteswap_compat(T value) noexcept {
+    static_assert(std::is_integral_v<T>);
+    using U = std::make_unsigned_t<T>;
+    const U unsigned_value = static_cast<U>(value);
+    if constexpr (sizeof(T) == 2) {
+        return static_cast<T>(__builtin_bswap16(unsigned_value));
+    } else if constexpr (sizeof(T) == 4) {
+        return static_cast<T>(__builtin_bswap32(unsigned_value));
+    } else if constexpr (sizeof(T) == 8) {
+        return static_cast<T>(__builtin_bswap64(unsigned_value));
+    } else {
+        return value;
+    }
+}
+#endif
+
 enum class MsgPackType : uint8_t { Integer, String, Map, Array, Boolean };
 
 struct MsgPackElement {
@@ -31,9 +52,15 @@ struct MsgPackElement {
     std::string_view val;
     int64_t as_int() const {
         if (val.size() == 1) return static_cast<int8_t>(val[0]);
-        if (val.size() == 2) return std::byteswap(*reinterpret_cast<const int16_t*>(val.data()));
-        if (val.size() == 4) return std::byteswap(*reinterpret_cast<const int32_t*>(val.data()));
-        return std::byteswap(*reinterpret_cast<const int64_t*>(val.data()));
+#if __cplusplus >= 202302L
+	if (val.size() == 2) return std::byteswap(*reinterpret_cast<const int16_t*>(val.data()));
+	if (val.size() == 4) return std::byteswap(*reinterpret_cast<const int32_t*>(val.data()));
+	return std::byteswap(*reinterpret_cast<const int64_t*>(val.data()));
+#else
+        if (val.size() == 2) return byteswap_compat(*reinterpret_cast<const int16_t*>(val.data()));
+        if (val.size() == 4) return byteswap_compat(*reinterpret_cast<const int32_t*>(val.data()));
+        return byteswap_compat(*reinterpret_cast<const int64_t*>(val.data()));
+#endif
     }
 };
 
@@ -368,7 +395,11 @@ inline uint16_t PacketCursorFull::read_uint16() {
     auto ret = try_get_contiguous(2, sv);
     if      (ret == 0) val = *reinterpret_cast<const uint16_t*>(sv.data());
     else if (ret == 1) { char b[2]; read_split(b, 2); val = *reinterpret_cast<const uint16_t*>(b); }
+#if __cplusplus >= 202302L
     return std::byteswap(val);
+#else
+    return byteswap_compat(val);
+#endif
 }
 inline uint32_t PacketCursorFull::read_uint32() {
     uint32_t val = 0;
@@ -376,7 +407,11 @@ inline uint32_t PacketCursorFull::read_uint32() {
     auto ret = try_get_contiguous(4, sv);
     if      (ret == 0) val = *reinterpret_cast<const uint32_t*>(sv.data());
     else if (ret == 1) { char b[4]; read_split(b, 4); val = *reinterpret_cast<const uint32_t*>(b); }
+#if __cplusplus >= 202302L
     return std::byteswap(val);
+#else
+    return byteswap_compat(val);
+#endif
 }
 
 // ---------------------------------------------------------------------------

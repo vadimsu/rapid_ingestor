@@ -39,7 +39,6 @@ int on_header(nghttp2_session* session, const nghttp2_frame* frame,
     std::string_view k(reinterpret_cast<const char*>(name), namelen);
     std::string_view v(reinterpret_cast<const char*>(value), valuelen);
 
-    fmt::print("{} {} {} {}\n",__FILE__,__LINE__,k,v);
     if (k == ":path") {
         if (v == "/opentelemetry.proto.collector.trace.v1.TraceService/Export") {
             stream->signal = OtlpSignal::Traces;
@@ -64,13 +63,11 @@ int on_data_chunk_recv(nghttp2_session* session, uint8_t /*flags*/,
     if (!stream || !otelProtocol) return 0;
 #if 0
 
-    fmt::print("{} {} {} {}\n",__FILE__,__func__,stream_id,len);
     // Optional: enforce a max payload cap (e.g., 16 MiB) and RST_STREAM if exceeded
     stream->recv_buf.append(reinterpret_cast<const char*>(data), len);
     stream->total_bytes += len;
 #else
     if (len == 0) return 0;
-    fmt::print("{} {} {} {}\n",__FILE__,__func__,stream_id,len);
     // Compute offset inside the active Seastar temporary_buffer
     auto* base = reinterpret_cast<const uint8_t*>(otelProtocol->getCurrentBuf().get());
     size_t offset = static_cast<size_t>(data - base);

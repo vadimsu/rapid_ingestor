@@ -1,11 +1,14 @@
 #pragma once
 
+#include <cstring>
 #include <vector>
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
 #include <seastar/net/inet_address.hh>
 #include <seastar/core/when_all.hh>
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <netinet/tcp.h>
 #include <linux/net_tstamp.h>
 
@@ -13,7 +16,7 @@ namespace RapidIngestor{
 
 	class Connection : public seastar::enable_lw_shared_from_this<Connection> {
 		public:
-			Connection(seastar::connected_socket fd, seastar::socket_address addr): _fd(std::move(fd)), _addr(addr), _in(_fd.input([]{
+			Connection(seastar::connected_socket fd, seastar::socket_address addr, bool low_latency = false): _fd(std::move(fd)), _addr(addr), _in(_fd.input([]{
 																	seastar::connected_socket_input_stream_config csisc;
 																	csisc.buffer_size     = 128 * 1024;
 																	csisc.min_buffer_size = 128 * 1024;
@@ -24,7 +27,7 @@ namespace RapidIngestor{
 //				int size = 65535;
 //				_fd.set_sockopt(SOL_SOCKET, SO_RCVBUF, (const void*) &size, sizeof(size));
 //				_fd.set_sockopt(SOL_SOCKET, SO_SNDBUF, (const void*) &size, sizeof(size));
-				int opt = 4096;
+				int opt = low_latency ? 1 : 4096;
 				_fd.set_sockopt(SOL_SOCKET, SO_RCVLOWAT, (const void*) &opt, sizeof(opt));
 				opt = 1;
 				_fd.set_sockopt(IPPROTO_TCP, TCP_QUICKACK, (const void*) &opt, sizeof(opt));
@@ -45,7 +48,14 @@ namespace RapidIngestor{
 				co_return buf;
 			}
 			seastar::future<> send(const char * buf, size_t len){
-				return seastar::make_ready_future<>();
+				seastar::temporary_buffer<char> copy(len);
+				std::memcpy(copy.get_write(), buf, len);
+				co_await _out.write(std::move(copy));
+				co_await _out.flush();
+			}
+			void shutdown() {
+				_fd.shutdown_input();
+				_fd.shutdown_output();
 			}
 			bool isAlive() { return !_in.eof(); }
 			seastar::future<> stop() {

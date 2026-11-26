@@ -6,7 +6,6 @@
 #include <string_view>
 #include <seastar/core/seastar.hh>
 #include <seastar/core/condition-variable.hh>
-#include <seastar/core/gate.hh>
 #include <nghttp2/nghttp2.h>
 #include "rapid_ingestor_listener.hh"
 #include "rapid_ingestor_protocol.hh"
@@ -46,6 +45,7 @@ class OtelProtocol : public IProtocol {
 
 		// Call this after ANY nghttp2_submit_*() or mem_recv2()
 		void maybe_wake_writer();
+		void send_grpc_ok(int32_t stream_id);
 		void send_grpc_error(int32_t stream_id, GrpcStatus grpc_status);
 		void handle_trace_batch(
 			const opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest& request);
@@ -63,7 +63,6 @@ class OtelProtocol : public IProtocol {
 		IsOverloaded _isOverloaded;
 		WaitForCapacity _waitForCapacity;
 		seastar::condition_variable _write_cv;
-		seastar::gate _gate;
 		bool _closed = false;
 		std::unordered_map<int32_t, StreamCtx*> _streams;
 		seastar::temporary_buffer<char> _current_buf;

@@ -36,7 +36,7 @@ seastar::future<> Listener::listen(seastar::sstring ip, uint16_t port, Sink sink
 				protocol = seastar::make_shared<OtelProtocol>(addr);
 			}
 			fmt::print("Protocol type {}\n",protocol_type);
-			auto conn = seastar::make_lw_shared<Connection>(std::move(fd), addr);
+			auto conn = seastar::make_lw_shared<Connection>(std::move(fd), addr, protocol_type == "otel");
 //			fmt::print("accepted {}\n",addr);
 			if (_sink) {
 				auto sink = _sink;
