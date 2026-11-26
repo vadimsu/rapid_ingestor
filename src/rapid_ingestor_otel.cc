@@ -1,7 +1,10 @@
 
 #include <unordered_map>
 #include <vector>
+#include <array>
+#include <cstring>
 #include <nghttp2/nghttp2.h>
+#include <google/protobuf/util/json_util.h>
 #include "rapid_ingestor_listener.hh"
 #include "rapid_ingestor_otel.hh"
 #include "rapid_ingestor_nghttp2_callbacks.hh"
@@ -59,7 +62,9 @@ RapidIngestorStats& OtelProtocol::getStats() {
 	return _stats;
 }
 
-void OtelProtocol::setSink(ProtocolEngine::RecordSink sink) {}
+void OtelProtocol::setSink(ProtocolEngine::RecordSink sink) {
+	_sink = std::move(sink);
+}
 
 void OtelProtocol::setBackpressure(IsOverloaded isOverloaded, WaitForCapacity waitForCapacity) {
 	_isOverloaded = std::move(isOverloaded);
@@ -78,16 +83,104 @@ StreamCtx* OtelProtocol::create_stream(int32_t stream_id){
 	return stream;
 }
 
-void send_grpc_error(int32_t stream_id, GrpcStatus grpcStatus){
+void OtelProtocol::send_grpc_error(int32_t stream_id, GrpcStatus grpc_status) {
+	const char* status = nullptr;
+	const char* message = nullptr;
+	switch (grpc_status) {
+		case GrpcStatus::InvalidArgument:
+			status = "3";
+			message = "invalid argument";
+			break;
+		case GrpcStatus::Unimplemented:
+			status = "12";
+			message = "unimplemented";
+			break;
+		case GrpcStatus::Internal:
+			status = "13";
+			message = "internal";
+			break;
+		case GrpcStatus::Ok:
+			return;
+		default:
+			status = "13";
+			message = "internal";
+			break;
+	}
+
+	auto make_header = [](const char* name, const char* value) {
+		return nghttp2_nv{
+			reinterpret_cast<uint8_t*>(const_cast<char*>(name)),
+			reinterpret_cast<uint8_t*>(const_cast<char*>(value)),
+			std::strlen(name),
+			std::strlen(value),
+			NGHTTP2_NV_FLAG_NONE};
+	};
+
+	std::array<nghttp2_nv, 4> headers{
+		make_header(":status", "200"),
+		make_header("content-type", "application/grpc"),
+		make_header("grpc-status", status),
+		make_header("grpc-message", message)};
+
+	int rv = nghttp2_submit_response(
+		_session, stream_id, headers.data(), headers.size(), nullptr);
+	if (rv != 0) {
+		fmt::print(stderr, "Failed to submit gRPC error response on stream {}: {}\n",
+		           stream_id, nghttp2_strerror(rv));
+		return;
+	}
+	maybe_wake_writer();
 }
 
-void handle_trace_batch(int32_t stream_id, opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest&& req){
+void OtelProtocol::emit_json_record(
+	std::string_view tag, const google::protobuf::Message& message) {
+	_json_buffer.clear();
+	auto status = google::protobuf::util::MessageToJsonString(message, &_json_buffer);
+	if (!status.ok()) {
+		fmt::print(stderr, "Failed to serialize OTLP record as JSON: {}\n",
+		           status.message());
+		++_stats.fatalErrors;
+		return;
+	}
+
+	if (!_sink) {
+		return;
+	}
+
+	StackLogFrame frame;
+	frame.count = 1;
+	frame.elements[0] = MsgPackElement{
+		.type = MsgPackType::String,
+		.key = "payload",
+		.val = _json_buffer};
+	_sink(tag, frame);
 }
 
-void handle_metrics_batch(int32_t stream_id, opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest&& req){
+void OtelProtocol::handle_trace_batch(
+	const opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest& request) {
+	for (const auto& resource_spans : request.resource_spans()) {
+		++_stats.messagesParsed;
+		_stats.bytesProcessed += resource_spans.ByteSizeLong();
+		emit_json_record("otel.trace", resource_spans);
+	}
 }
 
-void  handle_logs_batch(int32_t stream_id, opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest&& req){
+void OtelProtocol::handle_metrics_batch(
+	const opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest& request) {
+	for (const auto& resource_metrics : request.resource_metrics()) {
+		++_stats.messagesParsed;
+		_stats.bytesProcessed += resource_metrics.ByteSizeLong();
+		emit_json_record("otel.metrics", resource_metrics);
+	}
+}
+
+void OtelProtocol::handle_logs_batch(
+	const opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest& request) {
+	for (const auto& resource_logs : request.resource_logs()) {
+		++_stats.messagesParsed;
+		_stats.bytesProcessed += resource_logs.ByteSizeLong();
+		emit_json_record("otel.logs", resource_logs);
+	}
 }
 
 void OtelProtocol::dispatch_otlp_request(StreamCtx* stream){
@@ -110,8 +203,8 @@ void OtelProtocol::dispatch_otlp_request(StreamCtx* stream){
 				send_grpc_error(stream->stream_id, st);
 				return;
 			}
-			// Hand `std::move(req)` to your ingestion pipeline / shard / ClickHouse writer
-			handle_trace_batch(stream->stream_id, std::move(req));
+			// Hand the decoded request to the ingestion pipeline / shard / ClickHouse writer.
+			handle_trace_batch(req);
 			break;
 		}
 
@@ -130,7 +223,7 @@ void OtelProtocol::dispatch_otlp_request(StreamCtx* stream){
 				send_grpc_error(stream->stream_id, st);
 				return;
 			}
-			handle_metrics_batch(stream->stream_id, std::move(req));
+			handle_metrics_batch(req);
 			break;
 		}
 
@@ -149,7 +242,7 @@ void OtelProtocol::dispatch_otlp_request(StreamCtx* stream){
 				send_grpc_error(stream->stream_id, st);
 				return;
 			}
-			handle_logs_batch(stream->stream_id, std::move(req));
+			handle_logs_batch(req);
 			break;
 		}
 
