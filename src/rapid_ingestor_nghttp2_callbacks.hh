@@ -57,13 +57,13 @@ int on_data_chunk_recv(nghttp2_session* session,
 enum class OtlpSignal : uint8_t { Unknown, Traces, Metrics, Logs };
 
 struct StreamCtx {
-    StreamCtx(int32_t stream_id):_stream_id(stream_id){}
+    StreamCtx(int32_t stream_id): stream_id(stream_id){}
     std::string path;
-    int32_t _stream_id = 0;
+    int32_t stream_id = 0;
     OtlpSignal signal = OtlpSignal::Unknown;
     bool gzip_compressed = false;
-    std::vector<seastar::temporary_buffer<char>> chunks;
-    size_t total_bytes = 0;
+    std::vector<seastar::temporary_buffer<char>> recv_chunks;
+    size_t total_recv_bytes = 0;
     std::string recv_buf; // Accumulates 5-byte gRPC prefix + Protobuf payload
     std::string send_buf; // Holds 5-byte gRPC prefix + serialized response
     size_t send_offset = 0;

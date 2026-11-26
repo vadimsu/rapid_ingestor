@@ -5,7 +5,10 @@
 #include "rapid_ingestor_listener.hh"
 #include "rapid_ingestor_otel.hh"
 #include "rapid_ingestor_nghttp2_callbacks.hh"
-#include "rapid_ingestor_grpc.hh"
+#include "rapid_ingestor_otlp.hh"
+#include "opentelemetry/proto/collector/logs/v1/logs_service.pb.h"
+#include "opentelemetry/proto/collector/metrics/v1/metrics_service.pb.h"
+#include "opentelemetry/proto/collector/trace/v1/trace_service.pb.h"
 
 namespace RapidIngestor{
 
@@ -75,11 +78,88 @@ StreamCtx* OtelProtocol::create_stream(int32_t stream_id){
 	return stream;
 }
 
-void OtelProtocol::dispatch_otlp_request(StreamCtx* ctx){
-	fmt::print("{} {} {} {}\n",__FILE__,__func__,__LINE__,ctx->total_bytes);
-	 GrpcHeaderResult grpcHeaderResult = parse_grpc_header(ctx->chunks, ctx->total_bytes);
-	 fmt::print("{} {} {} {} {}\n",(int)grpcHeaderResult.status, grpcHeaderResult.header.compressed, grpcHeaderResult.header.length, grpcHeaderResult.header.payload_chunk_idx, grpcHeaderResult.header.payload_offset);
-	 fmt::print("{} ",static_cast<const char*>(ctx->chunks[grpcHeaderResult.header.payload_chunk_idx].get() + grpcHeaderResult.header.payload_offset));
+void send_grpc_error(int32_t stream_id, GrpcStatus grpcStatus){
+}
+
+void handle_trace_batch(int32_t stream_id, opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest&& req){
+}
+
+void handle_metrics_batch(int32_t stream_id, opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest&& req){
+}
+
+void  handle_logs_batch(int32_t stream_id, opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest&& req){
+}
+
+void OtelProtocol::dispatch_otlp_request(StreamCtx* stream){
+	if (!stream) return;
+
+	switch (stream->signal) {
+		case OtlpSignal::Traces: {
+			opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest req;
+			GrpcStatus st = decode_grpc_message(
+						stream->recv_chunks,
+						stream->total_recv_bytes,
+						stream->gzip_compressed,
+						req);
+
+			// Release socket buffer slices early—they are no longer needed after parsing
+			stream->recv_chunks.clear();
+			stream->total_recv_bytes = 0;
+
+			if (st != GrpcStatus::Ok) {
+				send_grpc_error(stream->stream_id, st);
+				return;
+			}
+			// Hand `std::move(req)` to your ingestion pipeline / shard / ClickHouse writer
+			handle_trace_batch(stream->stream_id, std::move(req));
+			break;
+		}
+
+		case OtlpSignal::Metrics: {
+			opentelemetry::proto::collector::metrics::v1::ExportMetricsServiceRequest req;
+			GrpcStatus st = decode_grpc_message(
+						stream->recv_chunks,
+						stream->total_recv_bytes,
+						stream->gzip_compressed,
+						req);
+
+			stream->recv_chunks.clear();
+			stream->total_recv_bytes = 0;
+
+			if (st != GrpcStatus::Ok) {
+				send_grpc_error(stream->stream_id, st);
+				return;
+			}
+			handle_metrics_batch(stream->stream_id, std::move(req));
+			break;
+		}
+
+		case OtlpSignal::Logs: {
+			opentelemetry::proto::collector::logs::v1::ExportLogsServiceRequest req;
+			GrpcStatus st = decode_grpc_message(
+						stream->recv_chunks,
+						stream->total_recv_bytes,
+						stream->gzip_compressed,
+						req);
+
+			stream->recv_chunks.clear();
+			stream->total_recv_bytes = 0;
+
+			if (st != GrpcStatus::Ok) {
+				send_grpc_error(stream->stream_id, st);
+				return;
+			}
+			handle_logs_batch(stream->stream_id, std::move(req));
+			break;
+		}
+
+		case OtlpSignal::Unknown:
+		default:
+			stream->recv_chunks.clear();
+			stream->total_recv_bytes = 0;
+			send_grpc_error(stream->stream_id, GrpcStatus::Unimplemented);
+			break;
+	}
 }
 
 void OtelProtocol::destroy_stream(int32_t stream_id){

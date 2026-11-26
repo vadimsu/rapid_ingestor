@@ -8,8 +8,6 @@
 #include "rapid_ingestor_tcp_af_helper.hh"
 #include "rapid_ingestor_unix_af_helper.hh"
 #include "rapid_ingestor_listener.hh"
-//#include "rapid_ingestor_native.hh"
-//#include "rapid_ingestor_grpc.hh"
 
 namespace bpo = boost::program_options;
 

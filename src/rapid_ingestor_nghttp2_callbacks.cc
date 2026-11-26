@@ -76,8 +76,8 @@ int on_data_chunk_recv(nghttp2_session* session, uint8_t /*flags*/,
     size_t offset = static_cast<size_t>(data - base);
 
     // Zero-copy ref-counted slice
-    stream->chunks.push_back(otelProtocol->getCurrentBuf().share(offset, len));
-    stream->total_bytes += len;
+    stream->recv_chunks.push_back(otelProtocol->getCurrentBuf().share(offset, len));
+    stream->total_recv_bytes += len;
 #endif
     return 0;
 }
