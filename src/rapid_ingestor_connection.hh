@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstring>
 #include <vector>
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
@@ -48,10 +47,10 @@ namespace RapidIngestor{
 				co_return buf;
 			}
 			seastar::future<> send(const char * buf, size_t len){
-				seastar::temporary_buffer<char> copy(len);
-				std::memcpy(copy.get_write(), buf, len);
-				co_await _out.write(std::move(copy));
-				co_await _out.flush();
+				return _out.write(buf, len);
+			}
+			seastar::future<> flush() {
+				return _out.flush();
 			}
 			void shutdown() {
 				_fd.shutdown_input();

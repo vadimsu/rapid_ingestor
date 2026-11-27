@@ -367,6 +367,7 @@ seastar::future<> OtelProtocol::write_loop() {
 		});
 
 		// Drain all currently queued HTTP/2 frames
+		bool wrote = false;
 		while (nghttp2_session_want_write(_session)) {
 			const uint8_t* data = nullptr;
 			nghttp2_ssize len = nghttp2_session_mem_send2(_session, &data);
@@ -375,6 +376,10 @@ seastar::future<> OtelProtocol::write_loop() {
 				break;
 			}
 			co_await _connection->send(reinterpret_cast<const char*>(data), static_cast<size_t>(len));
+			wrote = true;
+		}
+		if (wrote) {
+			co_await _connection->flush();
 		}
 
 //		co_await out_.flush();

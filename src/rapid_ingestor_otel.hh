@@ -33,7 +33,7 @@ class OtelProtocol : public IProtocol {
 		StreamCtx* create_stream(int32_t stream_id);
 		void dispatch_otlp_request(StreamCtx*);
 		void destroy_stream(int32_t stream_id);
-		seastar::temporary_buffer<char> getCurrentBuf() { return _current_buf.share(); }
+		seastar::temporary_buffer<char>& getCurrentBuf() { return _current_buf; }
 	private:
 		nghttp2_session_callbacks* init_h2_callbacks();
 
