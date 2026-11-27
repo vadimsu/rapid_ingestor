@@ -100,4 +100,5 @@ Testing and benchmarking:
 
 - tests/message_parser_regression_test.cc exercises the Forward-protocol parser directly
 - forward_traffic_gen/ is a standalone load generator used to drive sustained high-throughput benchmarks against the listener
+- otel_traffic_gen/ is a Seastar/nghttp2 load generator for OTLP/gRPC traces, metrics, and logs
 - benchmarking/ holds comparison configs/scripts against Fluent Bit and Vector over both TCP and Unix domain sockets

@@ -4,3 +4,12 @@
 [submodule "json"]
 	path = json
 	url = https://github.com/nlohmann/json.git
+[submodule "opentelemetry-proto"]
+	path = opentelemetry-proto
+	url = https://github.com/vadimsu/opentelemetry-proto
+[submodule "nghttp2"]
+	path = nghttp2
+	url = https://github.com/vadimsu/nghttp2
+[submodule "protobuf"]
+	path = protobuf
+	url = https://github.com/vadimsu/protobuf

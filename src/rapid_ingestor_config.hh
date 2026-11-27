@@ -143,21 +143,32 @@ namespace RapidIngestor{
                 			return;
 		        	}
 			        for (auto it = sources_it->begin(); it != sources_it->end(); it++){
-					std::string protocol, port, key, cert, trusted, ipaddr;
+					std::string protocol, port = "0", key, cert, trusted, ipaddr, path;
         	        		auto protocol_it = it->find("protocol");
 					if (protocol_it != it->end()){
 				                protocol = to_string(*protocol_it);
         	        			protocol = protocol.substr(1, protocol.size() - 2);
 					}
-					if (protocol == "UNIX"){
-						auto path_it = it->find("path");
-						if (path_it != it->end()){
-							ipaddr = to_string(*path_it);
-							ipaddr = ipaddr.substr(1, ipaddr.size() - 2);
-							port = "0";//dummy
-						}
+					auto path_it = it->find("path");
+					if (path_it != it->end()){
+						path = to_string(*path_it);
+						path = path.substr(1, path.size() - 2);
+						port = "0";//dummy
 					}else{
-						if (protocol == "TLS"){
+						auto cert_it = it->find("certificate");
+						if (cert_it != it->end()){
+							cert = to_string(*cert_it);
+							cert = cert.substr(1, cert.size() - 2);
+						}
+						auto key_it = it->find("key");
+						if (key_it != it->end()){
+							key = to_string(*key_it);
+							key = key.substr(1, key.size() - 2);
+						}
+						auto trusted_it = it->find("trusted");
+						if (trusted_it != it->end()){
+							trusted = to_string(*trusted_it);
+							trusted = trusted.substr(1, trusted.size() - 2);
 						}
 						auto ip_it = it->find("ip");
 						if (ip_it != it->end()){
@@ -170,8 +181,8 @@ namespace RapidIngestor{
 							port = port.substr(1, port.size() - 2);
 						}
 					}
-					fmt::print("Source protocol {} ip {} key {} cert {} trusted {} port {}\n",protocol, ipaddr, key,cert,trusted,port);
-					_sources.addSource(protocol, ipaddr, key, cert, trusted, std::stoi(port));
+					fmt::print("Source protocol {} ip {} key {} cert {} trusted {} port {} path {}\n",protocol, ipaddr, key,cert,trusted,port,path);
+					_sources.addSource(protocol, ipaddr != "" ? ipaddr : path, key, cert, trusted, std::stoi(port));
 			                /*for (unsigned core = 0; core < smp::count; core++) {
                 		        	(void)loggingController<AppFlavor...>->invoke_on(core, &LoggingController<AppFlavor...>::setEventEnabled, *ev, enabled);
 	                		}*/

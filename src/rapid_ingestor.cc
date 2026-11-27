@@ -8,16 +8,17 @@
 #include "rapid_ingestor_tcp_af_helper.hh"
 #include "rapid_ingestor_unix_af_helper.hh"
 #include "rapid_ingestor_listener.hh"
-#include "rapid_ingestor_protocol.hh"
 
 namespace bpo = boost::program_options;
 
-auto listeners = new seastar::sharded<RapidIngestor::Listener>();
-seastar::timer<> statsTimer = seastar::timer<>();
+//auto listeners = new seastar::sharded<RapidIngestor::Listener>();
+std::vector<seastar::sharded<RapidIngestor::Listener>*> listeners;
+//seastar::timer<> statsTimer = seastar::timer<>();
+std::vector<seastar::timer<>> statsTimers;
 RapidIngestor::RapidIngestorStats gMessagesProcessed;
 
-seastar::future<RapidIngestor::RapidIngestorStats> get_all_stats(){
-	return listeners->map_reduce(seastar::adder<RapidIngestor::RapidIngestorStats>(),&RapidIngestor::Listener::getStats);
+seastar::future<RapidIngestor::RapidIngestorStats> get_all_stats(seastar::sharded<RapidIngestor::Listener>* listener){
+	return listener->map_reduce(seastar::adder<RapidIngestor::RapidIngestorStats>(),&RapidIngestor::Listener::getStats);
 }
 
 int main(int argc, char **argv){
@@ -38,36 +39,30 @@ int main(int argc, char **argv){
 				auto src = sources.begin();
 				std::vector<seastar::future<>> futs;
 				for (;src != sources.end();src++){
-					if (src->protocol == "TCP" || src->protocol == "UNIX"){
-						if (src->protocol == "UNIX"){
-							fmt::print("removing unix domain socket file {}\n",src->ipaddr);
-							seastar::remove_file(fmt::format("{}",src->ipaddr));
-						}
-						fmt::print("created listener {} {}\n",src->ipaddr,src->port);
-						auto fut = listeners->start().then([source=*src, config] {
-							statsTimer.set_callback([]{
-								get_all_stats().then([](RapidIngestor::RapidIngestorStats stats){
-									gMessagesProcessed += stats;
-									fmt::print("Total messages {} bytes {} rows inserted {} unparsed {} fatal errors {}\n",
-											stats.messagesParsed, stats.bytesProcessed, stats.rowsInserted, stats.unparsedBufferSize,stats.fatalErrors);
-								});
-							});
-							statsTimer.arm_periodic(std::chrono::seconds(1));
-							const auto& sinks = config->getSinks();
-							const auto sinkIt = sinks.begin();
-							const RapidIngestor::Sink& sink = *sinkIt;
-							fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
-							return listeners->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink).handle_exception([](std::exception_ptr ep){
-								fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
-								return seastar::make_ready_future<>();
-							});
+					fmt::print("created listener {} {}\n",src->ipaddr,src->port);
+					auto listener = new seastar::sharded<RapidIngestor::Listener>();
+					listeners.push_back(listener);
+					statsTimers.push_back(seastar::timer<>());
+					statsTimers[statsTimers.size()-1].set_callback([listener, source=*src]{
+						get_all_stats(listener).then([source](RapidIngestor::RapidIngestorStats stats){
+							gMessagesProcessed += stats;
+							fmt::print("Listener {}:{} ({}) Total messages {} bytes {} rows inserted {} unparsed {} fatal errors {}\n",
+								source.ipaddr, source.port, source.protocol, stats.messagesParsed,
+								stats.bytesProcessed, stats.rowsInserted, stats.unparsedBufferSize,stats.fatalErrors);
 						});
-						futs.push_back(std::move(fut));
-					}else if (src->protocol == "TLS"){
-						fmt::print("TLS listeners are not supported yet\n");
-					}else{
-						fmt::print("unknown protocol {}\n",src->protocol);
-					}
+					});
+					statsTimers[statsTimers.size()-1].arm_periodic(std::chrono::seconds(1));
+					auto fut = listener->start().then([source=*src, config, listener] {
+						const auto& sinks = config->getSinks();
+						const auto sinkIt = sinks.begin();
+						const RapidIngestor::Sink& sink = *sinkIt;
+						fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
+						return listener->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink, source.protocol).handle_exception([](std::exception_ptr ep){
+							fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
+							return seastar::make_ready_future<>();
+						});
+					});
+					futs.push_back(std::move(fut));
 				}
 				return seastar::when_all(futs.begin(), futs.end()).then([] (auto futs){
 					return seastar::make_ready_future<>();
