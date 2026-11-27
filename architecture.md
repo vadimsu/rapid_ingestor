@@ -65,14 +65,21 @@ Memory management:
 
 Configuration:
 
-- JSON config file (see benchmarking/config.json) declares `sources` (protocol: TCP/UNIX, currently TLS is parsed but not implemented) and `sinks` (ClickHouse connection: database_type/database_table/mode/host/port/dbname/username/password/target_column/encoding/columns - see below)
+- JSON config file (see benchmarking/config.json) supports both the legacy
+  arrays and a named Vector-style DAG. Named `sources`, `transforms`, and
+  `sinks` use `inputs` references; OTLP sources expose `traces`, `metrics`,
+  and `logs` ports. The compiler validates references, duplicate IDs, cycles,
+  and computes a deterministic topological order. Transforms are currently
+  compiled only; execution will be added with the pipeline runtime.
 - Example sink configs under `benchmarking/`, one per mode:
 	- `config.json` / `config_vm_loopback.json` / `config_unixdomain.json` - default single-column `raw_text` mode (unchanged `payload` column)
 	- `config_single_column_text.json` - single-column mode with a renamed `target_column` and explicit flat-text `encoding`
 	- `config_single_column_json.json` - single-column mode with a renamed `target_column`, `tag_map`'s `Map(String, String)` projection, and explicit JSON `encoding`
 	- `config_multi_column.json` - multi-column/superset-schema mode mixing string/int64/bool columns, one aliased column, and JSON coercion of a nested-map field
 	- `config_multi_column_aliasing.json` - multi-column mode focused purely on explicit aliasing (every `source` field renamed to a differently-named `target_column`)
-- Only the first usable source and the first sink in the config are currently started; multiple concurrent sources/sinks are not yet wired up
+- The current runtime adapter still starts the first usable source and first
+  sink. The compiled graph is exposed for the next pipeline-runtime phase;
+  named transforms are not silently treated as runtime operations.
 
 Output: ClickHouse sink (native TCP protocol):
 

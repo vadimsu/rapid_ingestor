@@ -1,5 +1,14 @@
 #pragma once
 
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <numeric>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
 #include <vector>
 #include "nlohmann/json.hpp"
 #include "seastar/core/file.hh"
@@ -8,7 +17,93 @@
 namespace fs = std::filesystem;
 
 namespace RapidIngestor{
+	struct PipelineComponent {
+		seastar::sstring id;
+		seastar::sstring type;
+		std::vector<seastar::sstring> inputs;
+	};
+
+	class PipelineGraph {
+		public:
+			const std::vector<PipelineComponent>& components() const { return _components; }
+			const std::vector<seastar::sstring>& topologicalOrder() const { return _topological_order; }
+			bool empty() const { return _components.empty(); }
+
+			void add(PipelineComponent component) {
+				if (component.id.empty()) {
+					throw std::invalid_argument("pipeline component id must not be empty");
+				}
+				if (!_by_id.emplace(component.id, _components.size()).second) {
+					throw std::invalid_argument(
+						fmt::format("duplicate pipeline component '{}'", component.id));
+				}
+				_components.push_back(std::move(component));
+			}
+
+			void validate() {
+				enum class Visit : uint8_t { Unvisited, Visiting, Visited };
+				std::vector<Visit> state(_components.size(), Visit::Unvisited);
+				_topological_order.clear();
+				std::function<void(size_t)> visit = [&](size_t index) {
+					if (state[index] == Visit::Visiting) {
+						throw std::invalid_argument("pipeline graph contains a cycle");
+					}
+					if (state[index] == Visit::Visited) {
+						return;
+					}
+					state[index] = Visit::Visiting;
+					for (const auto& input : _components[index].inputs) {
+						auto it = _by_id.find(input);
+						if (it == _by_id.end()) {
+							auto separator = input.find('.');
+							if (separator != std::string::npos) {
+								auto source_id = input.substr(0, separator);
+								auto source_it = _by_id.find(source_id);
+								if (source_it != _by_id.end() &&
+									_components[source_it->second].type == "opentelemetry") {
+									auto port = input.substr(separator + 1);
+									if (port != "traces" && port != "metrics" && port != "logs") {
+										throw std::invalid_argument(fmt::format(
+											"source '{}' has unsupported output port '{}'",
+											source_id, port));
+									}
+									continue;
+								}
+							}
+						}
+						if (it == _by_id.end()) {
+							throw std::invalid_argument(fmt::format(
+								"component '{}' references unknown input '{}'",
+								_components[index].id, input));
+						}
+						if (_components[it->second].type == "clickhouse") {
+							throw std::invalid_argument(fmt::format(
+								"component '{}' cannot use sink '{}' as an input",
+								_components[index].id, input));
+						}
+						visit(it->second);
+					}
+					state[index] = Visit::Visited;
+					_topological_order.push_back(_components[index].id);
+				};
+				std::vector<size_t> order(_components.size());
+				std::iota(order.begin(), order.end(), 0);
+				std::sort(order.begin(), order.end(), [&](size_t left, size_t right) {
+					return _components[left].id < _components[right].id;
+				});
+				for (auto index : order) {
+					visit(index);
+				}
+			}
+
+		private:
+			std::vector<PipelineComponent> _components;
+			std::unordered_map<std::string, size_t> _by_id;
+			std::vector<seastar::sstring> _topological_order;
+	};
+
 	struct Source{
+		seastar::sstring id;
 		seastar::sstring protocol;
 		seastar::sstring ipaddr;
 		seastar::sstring key;
@@ -23,9 +118,9 @@ namespace RapidIngestor{
 
 			Sources(){fmt::print("_source {}\n",_sources.size());}
 			~Sources(){fmt::print("{} {}\n",__func__,__LINE__);}
-			void addSource(const seastar::sstring& protocol, const seastar::sstring& ipaddr, const seastar::sstring& key, const seastar::sstring& cert, const seastar::sstring& trusted, uint16_t port){
+			void addSource(const seastar::sstring& protocol, const seastar::sstring& ipaddr, const seastar::sstring& key, const seastar::sstring& cert, const seastar::sstring& trusted, uint16_t port, const seastar::sstring& id = {}){
 				fmt::print("_source {}\n",_sources.size());
-				_sources.push_back(Source{protocol: protocol, ipaddr: ipaddr, key: key, cert: cert, trusted: trusted, port: port});
+				_sources.push_back(Source{id: id, protocol: protocol, ipaddr: ipaddr, key: key, cert: cert, trusted: trusted, port: port});
 				fmt::print("_source {}\n",_sources.size());
 			}
 
@@ -34,6 +129,8 @@ namespace RapidIngestor{
 
 			const_iterator begin() const { return _sources.begin(); }
 			const_iterator end() const { return _sources.end(); }
+			size_t size() const { return _sources.size(); }
+			const Source& operator[](size_t index) const { return _sources[index]; }
 		private:
 			std::vector<Source> _sources;
 	};
@@ -52,6 +149,8 @@ namespace RapidIngestor{
 		seastar::sstring encoding;
 	};
 	struct Sink{
+		seastar::sstring id;
+		std::vector<seastar::sstring> inputs;
 		seastar::sstring database_type = "clickhouse";
 		seastar::sstring database_table;
 		seastar::sstring database_connection;
@@ -65,9 +164,9 @@ namespace RapidIngestor{
 		seastar::sstring dbname = "default";
 		seastar::sstring username = "default";
 		seastar::sstring password;
-		size_t max_batch_bytes;
-		size_t backpressure_pause_bytes;
-		size_t backpressure_resume_bytes;
+		size_t max_batch_bytes = 10ull * 1024 * 1024;
+		size_t backpressure_pause_bytes = 8ull * 1024 * 1024;
+		size_t backpressure_resume_bytes = 4ull * 1024 * 1024;
 		// Single-column (whole-record) mode: ClickHouse column name the
 		// serialized record is written to (replaces the previously hardcoded
 		// "payload"), and its text encoding ("text" | "json"; empty = derive
@@ -97,6 +196,8 @@ namespace RapidIngestor{
 
 			const_iterator begin() const { return _sinks.begin(); }
 			const_iterator end() const { return _sinks.end(); }
+			size_t size() const { return _sinks.size(); }
+			const Sink& operator[](size_t index) const { return _sinks[index]; }
 		private:
 			std::vector<Sink> _sinks;
 	};
@@ -118,8 +219,8 @@ namespace RapidIngestor{
                         	        try {
                                 	        jsonPayload = nlohmann::json::parse(output);
 						process_json(jsonPayload);
-        	                        } catch(std::exception& exc){
-						std::cout<<"Exception "<<exc.what()<<std::endl;
+                        	        } catch(...) {
+						return seastar::make_exception_future<>(std::current_exception());
                         	        }
         	                        return seastar::make_ready_future<>();
                 	                });
@@ -136,7 +237,196 @@ namespace RapidIngestor{
 			}
 			const Sources& getSources(){ return _sources; }
 			const Sinks& getSinks() { return _sinks; }	
+			const PipelineGraph& getPipeline() const { return _pipeline; }
 		private:
+		        	static std::string string_value(
+		        		const nlohmann::json& object, const char* key, std::string fallback = {}) {
+		        		auto it = object.find(key);
+		        		if (it == object.end() || it->is_null()) {
+		        			return fallback;
+		        		}
+		        		if (!it->is_string()) {
+		        			throw std::invalid_argument(fmt::format(
+		        				"configuration field '{}' must be a string", key));
+		        		}
+		        		return it->get<std::string>();
+		        	}
+
+		        	static uint16_t port_value(const nlohmann::json& object, const char* key,
+		        		uint16_t fallback = 0) {
+		        		auto it = object.find(key);
+		        		if (it == object.end() || it->is_null()) {
+		        			return fallback;
+		        		}
+		        		if (it->is_number_unsigned() || it->is_number_integer()) {
+		        			auto value = it->get<unsigned long long>();
+		        			if (value > UINT16_MAX) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"configuration field '{}' is outside the port range", key));
+		        			}
+		        			return static_cast<uint16_t>(value);
+		        		}
+		        		if (it->is_string()) {
+		        			auto value = std::stoul(it->get<std::string>());
+		        			if (value > UINT16_MAX) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"configuration field '{}' is outside the port range", key));
+		        			}
+		        			return static_cast<uint16_t>(value);
+		        		}
+		        		throw std::invalid_argument(fmt::format(
+		        			"configuration field '{}' must be a port number", key));
+		        	}
+
+		        	static std::pair<std::string, uint16_t> address_value(
+		        		const nlohmann::json& object, const char* nested_key) {
+		        		std::string address;
+		        		auto nested = object.find(nested_key);
+		        		if (nested != object.end() && nested->is_object()) {
+		        			address = string_value(*nested, "address");
+		        		}
+		        		if (address.empty()) {
+		        			address = string_value(object, "address");
+		        		}
+		        		if (address.empty()) {
+		        			return {string_value(object, "ip", "127.0.0.1"),
+		        				port_value(object, "port")};
+		        		}
+		        		auto colon = address.rfind(':');
+		        		if (colon == std::string::npos) {
+		        			throw std::invalid_argument(fmt::format(
+		        				"address '{}' must include a port", address));
+		        		}
+		        		std::string host = address.substr(0, colon);
+		        		if (host.size() >= 2 && host.front() == '[' && host.back() == ']') {
+		        			host = host.substr(1, host.size() - 2);
+		        		}
+		        		return {host, static_cast<uint16_t>(std::stoul(address.substr(colon + 1)))};
+		        	}
+
+		        	static std::vector<seastar::sstring> inputs_value(
+		        		const nlohmann::json& object) {
+		        		std::vector<seastar::sstring> inputs;
+		        		auto it = object.find("inputs");
+		        		if (it == object.end()) {
+		        			return inputs;
+		        		}
+		        		if (!it->is_array()) {
+		        			throw std::invalid_argument("component 'inputs' must be an array");
+		        		}
+		        		for (const auto& input : *it) {
+		        			if (!input.is_string()) {
+		        				throw std::invalid_argument("component input must be a string");
+		        			}
+		        			inputs.emplace_back(input.get<std::string>());
+		        		}
+		        		return inputs;
+		        	}
+
+		        	void process_pipeline_sources(const nlohmann::json& sources) {
+		        		if (!sources.is_object()) {
+		        			throw std::invalid_argument("named 'sources' must be an object");
+		        		}
+		        		for (const auto& [id, value] : sources.items()) {
+		        			if (!value.is_object()) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"source '{}' must be an object", id));
+		        			}
+		        			auto type = string_value(value, "type");
+		        			auto protocol = string_value(value, "protocol", type);
+		        			std::transform(protocol.begin(), protocol.end(), protocol.begin(), ::tolower);
+		        			if (protocol == "opentelemetry" || protocol == "otel") {
+		        				protocol = "otel";
+		        				type = "opentelemetry";
+		        			}
+		        			if (protocol == "fluent" || protocol == "fluent_forward" ||
+		        				protocol == "tcp") protocol = "forward";
+		        			if (protocol != "otel" && protocol != "forward") {
+		        				throw std::invalid_argument(fmt::format(
+		        					"source '{}' has unsupported protocol '{}'", id, protocol));
+		        			}
+		        			auto address = address_value(value, protocol == "otel" ? "grpc" : "tcp");
+		        			_sources.addSource(protocol, address.first, string_value(value, "key"),
+		        				string_value(value, "certificate"), string_value(value, "trusted"),
+		        				address.second, id);
+		        			_pipeline.add({id, type, {}});
+		        		}
+		        	}
+
+		        	static Sink parse_named_sink(const std::string& id,
+		        		const nlohmann::json& value) {
+		        		if (!value.is_object()) {
+		        			throw std::invalid_argument(fmt::format(
+		        				"sink '{}' must be an object", id));
+		        		}
+		        		Sink sink;
+		        		sink.id = id;
+		        		sink.inputs = inputs_value(value);
+		        		sink.database_type = string_value(value, "database_type",
+		        			string_value(value, "type", "clickhouse"));
+		        		sink.database_table = string_value(value, "database_table",
+		        			string_value(value, "table"));
+		        		sink.database_connection = string_value(value, "database_connection");
+		        		sink.mode = string_value(value, "mode", sink.mode);
+		        		sink.target_column = string_value(value, "target_column", sink.target_column);
+		        		sink.encoding = string_value(value, "encoding", sink.encoding);
+		        		sink.host = string_value(value, "host", sink.host);
+		        		sink.port = port_value(value, "port", sink.port);
+		        		sink.dbname = string_value(value, "dbname",
+		        			string_value(value, "database", sink.dbname));
+		        		sink.username = string_value(value, "username",
+		        			string_value(value, "user", sink.username));
+		        		sink.password = string_value(value, "password", sink.password);
+		        		sink.max_batch_bytes = value.value("max_batch_bytes", sink.max_batch_bytes);
+		        		sink.backpressure_pause_bytes =
+		        			value.value("backpressure_pause_bytes", sink.backpressure_pause_bytes);
+		        		sink.backpressure_resume_bytes =
+		        			value.value("backpressure_resume_bytes", sink.backpressure_resume_bytes);
+		        		return sink;
+		        	}
+
+		        	void process_pipeline_sinks(const nlohmann::json& sinks) {
+		        		if (!sinks.is_object()) {
+		        			throw std::invalid_argument("named 'sinks' must be an object");
+		        		}
+		        		for (const auto& [id, value] : sinks.items()) {
+		        			auto sink = parse_named_sink(id, value);
+		        			if (sink.database_type != "clickhouse") {
+		        				throw std::invalid_argument(fmt::format(
+		        					"sink '{}' has unsupported type '{}'", id, sink.database_type));
+		        			}
+		        			if (sink.inputs.empty()) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"sink '{}' must have at least one input", id));
+		        			}
+		        			_sinks.addSink(sink);
+		        			_pipeline.add({id, string_value(value, "type", "clickhouse"),
+		        				sink.inputs});
+		        		}
+		        	}
+
+		        	void process_pipeline_transforms(const nlohmann::json& transforms) {
+		        		if (!transforms.is_object()) {
+		        			throw std::invalid_argument("named 'transforms' must be an object");
+		        		}
+		        		for (const auto& [id, value] : transforms.items()) {
+		        			if (!value.is_object()) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"transform '{}' must be an object", id));
+		        			}
+		        			auto type = string_value(value, "type");
+		        			if (type.empty()) {
+		        				throw std::invalid_argument(fmt::format(
+		        					"transform '{}' must have a type", id));
+		        			}
+		        			if (type != "filter" && type != "remap" && type != "route" &&
+		        				type != "rename") {
+		        				throw std::invalid_argument(fmt::format(
+		        					"transform '{}' has unsupported type '{}'", id, type));
+		        			}
+		        			_pipeline.add({id, type, inputs_value(value)});
+		        		}
+		        	}
 			void process_sources(nlohmann::json& jsonPayload){
 				auto sources_it = jsonPayload.find("sources");
 			        if (sources_it == jsonPayload.end()) {
@@ -307,11 +597,40 @@ namespace RapidIngestor{
 	        		}
 			}
 			void process_json(nlohmann::json& jsonPayload){
-			        process_sources(jsonPayload);
-				process_sinks(jsonPayload);
+				auto sources_it = jsonPayload.find("sources");
+				auto sinks_it = jsonPayload.find("sinks");
+				if (sources_it == jsonPayload.end() || sinks_it == jsonPayload.end()) {
+					throw std::invalid_argument("configuration requires 'sources' and 'sinks'");
+				}
+				if (sources_it->is_object() || sinks_it->is_object()) {
+					process_pipeline_sources(*sources_it);
+					auto transforms_it = jsonPayload.find("transforms");
+					if (transforms_it != jsonPayload.end()) {
+						process_pipeline_transforms(*transforms_it);
+					}
+					process_pipeline_sinks(*sinks_it);
+				} else {
+					process_sources(jsonPayload);
+					process_sinks(jsonPayload);
+					if (_sources.size() == 0 || _sinks.size() == 0) {
+						throw std::invalid_argument(
+							"configuration must contain at least one source and sink");
+					}
+					for (size_t i = 0; i < _sources.size(); ++i) {
+						_pipeline.add({fmt::format("source_{}", i), _sources[i].protocol, {}});
+					}
+					for (size_t i = 0; i < _sinks.size(); ++i) {
+						_pipeline.add({fmt::format("sink_{}", i), _sinks[i].database_type,
+							i == 0 ? std::vector<seastar::sstring>{
+								fmt::format("source_{}", std::min(i, _sources.size() - 1))} :
+								std::vector<seastar::sstring>{}});
+					}
+				}
+				_pipeline.validate();
 			}
 			seastar::sstring _json_file;
 			Sources _sources;
 			Sinks _sinks;
+			PipelineGraph _pipeline;
 	};
 }

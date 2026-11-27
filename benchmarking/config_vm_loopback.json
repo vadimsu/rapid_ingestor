@@ -1,19 +1,36 @@
 {
-	"sources":[
-		{
-			"protocol":"forward",
-			"port":"24224",
-			"ip":"127.0.0.1"
+	"sources":{
+		"otel_in":{
+			"type":"opentelemetry",
+			"grpc":{ "address": "127.0.0.1:8888"}
 		},
-		{
-			"protocol":"otel",
-			"port":"8888",
-			"ip":"127.0.0.1"
+		"fluent_forward_in":{
+			"type":"fluent_forward",
+			"tcp":{ "address": "127.0.0.1:24224"}
 		}
-	],
-	"sinks":[
-		{
-			"database_type":"clickhouse",
+	},
+	"sinks":{
+		"clickhouse_otel":{
+			"type":"clickhouse",
+			"inputs":["otel_in.traces"],
+			"database_table":"events",
+			"mode":"raw_text",
+			"host":"127.0.0.1",
+			"port":9000,
+			"dbname":"events",
+			"username":"default",
+			"password":"default",
+			"max_rows_per_insert":10000,
+			"max_batch_rows":1000000,
+			"max_batch_bytes":10485760,
+			"backpressure_pause_rows":1000000,
+			"backpressure_resume_rows":400000,
+			"backpressure_pause_bytes":209715200,
+			"backpressure_resume_bytes":104857600
+		},
+		"clickhouse_fluent":{
+			"type":"clickhouse",
+			"inputs":["fluent_forward_in"],
 			"database_table":"events",
 			"mode":"raw_text",
 			"host":"127.0.0.1",
@@ -29,5 +46,5 @@
 			"backpressure_pause_bytes":209715200,
 			"backpressure_resume_bytes":104857600
 		}
-	]
+	}
 }
