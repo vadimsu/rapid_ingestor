@@ -37,8 +37,12 @@ int main(int argc, char **argv){
 		return config->read().then([config]{
 				const auto& sources = config->getSources();
 				auto src = sources.begin();
+				size_t source_index = 0;
 				std::vector<seastar::future<>> futs;
 				for (;src != sources.end();src++){
+					const seastar::sstring source_id = src->id.empty()
+						? seastar::sstring(fmt::format("source_{}", source_index)) : src->id;
+					++source_index;
 					fmt::print("created listener {} {}\n",src->ipaddr,src->port);
 					auto listener = new seastar::sharded<RapidIngestor::Listener>();
 					listeners.push_back(listener);
@@ -52,12 +56,12 @@ int main(int argc, char **argv){
 						});
 					});
 					statsTimers[statsTimers.size()-1].arm_periodic(std::chrono::seconds(1));
-					auto fut = listener->start().then([source=*src, config, listener] {
+					auto fut = listener->start().then([source=*src, source_id, config, listener] {
 						const auto& sinks = config->getSinks();
-						const auto sinkIt = sinks.begin();
-						const RapidIngestor::Sink& sink = *sinkIt;
-						fmt::print("{} {} {}\n",__func__,__LINE__,sink.mode);
-						return listener->invoke_on_all(&RapidIngestor::Listener::listen, source.ipaddr, source.port, sink, source.protocol).handle_exception([](std::exception_ptr ep){
+						std::vector<RapidIngestor::Sink> sink_configs(sinks.begin(), sinks.end());
+						return listener->invoke_on_all(&RapidIngestor::Listener::listen,
+							source.ipaddr, source.port, std::move(sink_configs),
+							config->getPipeline(), source_id, source.protocol).handle_exception([](std::exception_ptr ep){
 							fmt::print("{} {} {}\n",__FILE__,__LINE__,ep);
 							return seastar::make_ready_future<>();
 						});

@@ -60,7 +60,8 @@ namespace RapidIngestor{
 								auto source_id = input.substr(0, separator);
 								auto source_it = _by_id.find(source_id);
 								if (source_it != _by_id.end() &&
-									_components[source_it->second].type == "opentelemetry") {
+									(_components[source_it->second].type == "opentelemetry" ||
+									 _components[source_it->second].type == "otel")) {
 									auto port = input.substr(separator + 1);
 									if (port != "traces" && port != "metrics" && port != "logs") {
 										throw std::invalid_argument(fmt::format(
@@ -197,6 +198,7 @@ namespace RapidIngestor{
 			const_iterator begin() const { return _sinks.begin(); }
 			const_iterator end() const { return _sinks.end(); }
 			size_t size() const { return _sinks.size(); }
+			Sink& operator[](size_t index) { return _sinks[index]; }
 			const Sink& operator[](size_t index) const { return _sinks[index]; }
 		private:
 			std::vector<Sink> _sinks;
@@ -349,7 +351,10 @@ namespace RapidIngestor{
 		        			_sources.addSource(protocol, address.first, string_value(value, "key"),
 		        				string_value(value, "certificate"), string_value(value, "trusted"),
 		        				address.second, id);
-		        			_pipeline.add({id, type, {}});
+		        			// Store the canonical runtime protocol in the graph. The
+		        			// user-facing aliases (fluent_forward, fluent, tcp, etc.)
+		        			// are normalized above.
+		        			_pipeline.add({id, protocol, {}});
 		        		}
 		        	}
 
@@ -620,6 +625,7 @@ namespace RapidIngestor{
 						_pipeline.add({fmt::format("source_{}", i), _sources[i].protocol, {}});
 					}
 					for (size_t i = 0; i < _sinks.size(); ++i) {
+						_sinks[i].id = fmt::format("sink_{}", i);
 						_pipeline.add({fmt::format("sink_{}", i), _sinks[i].database_type,
 							i == 0 ? std::vector<seastar::sstring>{
 								fmt::format("source_{}", std::min(i, _sources.size() - 1))} :

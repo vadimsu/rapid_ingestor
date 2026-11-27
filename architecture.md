@@ -78,8 +78,9 @@ Configuration:
 	- `config_multi_column.json` - multi-column/superset-schema mode mixing string/int64/bool columns, one aliased column, and JSON coercion of a nested-map field
 	- `config_multi_column_aliasing.json` - multi-column mode focused purely on explicit aliasing (every `source` field renamed to a differently-named `target_column`)
 - The current runtime adapter still starts the first usable source and first
-  sink. The compiled graph is exposed for the next pipeline-runtime phase;
-  named transforms are not silently treated as runtime operations.
+  sink. Runtime routing now follows the compiled graph and supports sink
+  fan-out. Graphs containing transforms are rejected explicitly until
+  transform execution is implemented.
 
 Output: ClickHouse sink (native TCP protocol):
 

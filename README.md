@@ -45,6 +45,7 @@ source output ports for OTLP are `traces`, `metrics`, and `logs`.
 
 Configuration loading validates component IDs, references, OTLP output ports,
 cycles, and deterministic topological ordering. Transforms are compiled and
-validated but are not executed by the current runtime yet; runtime processing
-still uses the existing source/sink adapter until the pipeline executor is
+validated but are not executed by the current runtime yet. Runtime routing
+now follows the compiled graph and supports sink fan-out, but a graph
+containing transforms is rejected explicitly until transform execution is
 implemented.
