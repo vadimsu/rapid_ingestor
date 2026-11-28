@@ -50,8 +50,15 @@ now follows the compiled graph and supports sink fan-out, but a graph
 containing transforms is rejected explicitly until transform execution is
 implemented.
 
-Runtime routing is built from synchronous `PipelineStage` components. Source
-and pass-through stages dispatch through prebuilt downstream edges, while
-ClickHouse stages call the existing synchronous sink API directly. No future,
-per-record heap allocation, or cross-core handoff is introduced by this
-component layer.
+Runtime routing is built from a dynamically constructed but compiled
+execution plan. Each node stores a preselected process function and opaque
+component state; source and pass-through nodes dispatch through prebuilt
+numeric edges, while ClickHouse nodes call the existing synchronous sink API
+directly. No virtual call, future, per-record heap allocation, or cross-core
+handoff is introduced by this component layer.
+
+Component process functions and named output ports are supplied by registries
+at startup. Tagged edges are compiled into `tag -> edge-index` buckets, while
+untagged edges use a separate direct bucket. Consequently, a record does not
+scan all outgoing edges to find matching ports; adding a new component or
+declared port does not require changing the execution-plan base class.

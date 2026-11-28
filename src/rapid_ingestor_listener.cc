@@ -10,26 +10,60 @@
 
 namespace RapidIngestor{
 
-void PipelineSinkStage::process(std::string_view tag,
-	const StackLogFrame& frame) {
-	_sink->add(tag, frame);
+void PipelineComponentRegistry::registerType(
+	seastar::sstring type, PipelineProcessFn process) {
+	if (!process || type.empty()) {
+		throw std::invalid_argument("pipeline component registration is invalid");
+	}
+	if (!_factories.emplace(std::move(type), process).second) {
+		throw std::invalid_argument("duplicate pipeline component registration");
+	}
+}
+
+PipelineProcessFn PipelineComponentRegistry::processFor(
+	std::string_view type) const {
+	auto it = _factories.find(seastar::sstring(type));
+	return it == _factories.end() ? nullptr : it->second;
+}
+
+void PipelinePortRegistry::registerPort(
+	seastar::sstring name, seastar::sstring tag) {
+	if (name.empty() || tag.empty() || !_tags.emplace(
+			std::move(name), std::move(tag)).second) {
+		throw std::invalid_argument("duplicate or invalid pipeline port registration");
+	}
+}
+
+std::optional<seastar::sstring> PipelinePortRegistry::tagFor(
+	std::string_view name) const {
+	auto it = _tags.find(seastar::sstring(name));
+	if (it == _tags.end()) {
+		return std::nullopt;
+	}
+	return it->second;
+}
+
+namespace {
+void forward_pipeline_record(PipelineExecutionPlan& plan, size_t node,
+	void*, std::string_view tag, const StackLogFrame& frame) {
+	plan.emit(node, tag, frame);
+}
+
+void sink_pipeline_record(PipelineExecutionPlan&,
+	size_t, void* state, std::string_view tag, const StackLogFrame& frame) {
+	static_cast<ClickHouseSink*>(state)->add(tag, frame);
+}
 }
 
 PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
-	seastar::sstring source_id)
+	seastar::sstring source_id, const PipelineComponentRegistry& components,
+	const PipelinePortRegistry& ports)
 	: _components(graph.components()), _source_id(std::move(source_id)) {
 	for (size_t i = 0; i < _components.size(); ++i) {
 		_component_by_id.emplace(_components[i].id, i);
-		if (_components[i].type != "clickhouse" &&
-			_components[i].type != "otel" &&
-			_components[i].type != "opentelemetry" &&
-			_components[i].type != "forward" &&
-			_components[i].type != "TCP" &&
-			_components[i].type != "TLS" &&
-			_components[i].type != "UNIX") {
+		if (!components.processFor(_components[i].type)) {
 			throw std::invalid_argument(fmt::format(
-				"runtime pipeline component '{}' of type '{}' is not implemented; "
-				"transforms are compile-only",
+				"runtime pipeline component '{}' of type '{}' is not registered",
 				_components[i].id, _components[i].type));
 		}
 	}
@@ -94,20 +128,18 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 			if (sink_it == _sink_by_id.end()) {
 				continue;
 			}
-			auto stage = std::make_unique<PipelineSinkStage>(
-				_sinks[sink_it->second]);
-			_stages.emplace(component.id, stage.get());
-			_stage_storage.push_back(std::move(stage));
+			auto node = _plan.addNode(&sink_pipeline_record,
+				_sinks[sink_it->second].get());
+			_stage_by_id.emplace(component.id, node);
 		} else {
-			auto stage = std::make_unique<PipelineForwardStage>();
-			_stages.emplace(component.id, stage.get());
-			_stage_storage.push_back(std::move(stage));
+			auto node = _plan.addNode(components.processFor(component.type), nullptr);
+			_stage_by_id.emplace(component.id, node);
 		}
 	}
 
 	for (const auto& component : _components) {
-		auto target_it = _stages.find(component.id);
-		if (target_it == _stages.end()) {
+		auto target_it = _stage_by_id.find(component.id);
+		if (target_it == _stage_by_id.end()) {
 			continue;
 		}
 		for (const auto& input : component.inputs) {
@@ -115,18 +147,55 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 			const bool has_port = separator != seastar::sstring::npos;
 			auto upstream = has_port
 				? seastar::sstring(input.data(), separator) : input;
-			auto upstream_it = _stages.find(upstream);
-			if (upstream_it == _stages.end()) {
+			auto upstream_it = _stage_by_id.find(upstream);
+			if (upstream_it == _stage_by_id.end()) {
 				continue;
 			}
 			auto port = has_port
 				? seastar::sstring(input.data() + separator + 1,
 					input.size() - separator - 1)
 				: seastar::sstring{};
-			upstream_it->second->addDownstream(target_it->second, std::move(port));
+			if (!port.empty()) {
+				auto tag = ports.tagFor(port);
+				if (!tag) {
+					throw std::invalid_argument(fmt::format(
+						"pipeline port '{}' has no runtime tag mapping", port));
+				}
+				_plan.connect(upstream_it->second, target_it->second, port);
+				_plan.indexTaggedEdge(upstream_it->second, *tag);
+			} else {
+				_plan.connect(upstream_it->second, target_it->second);
+			}
 		}
 	}
-	_source_stage = _stages.at(_source_id);
+	_source_stage = _stage_by_id.at(_source_id);
+	_has_source_stage = true;
+}
+
+const PipelineComponentRegistry& PipelineRouter::defaultComponents() {
+	static const auto registry = [] {
+		PipelineComponentRegistry value;
+		value.registerType("clickhouse", &sink_pipeline_record);
+		value.registerType("otel", &forward_pipeline_record);
+		value.registerType("opentelemetry", &forward_pipeline_record);
+		value.registerType("forward", &forward_pipeline_record);
+		value.registerType("TCP", &forward_pipeline_record);
+		value.registerType("TLS", &forward_pipeline_record);
+		value.registerType("UNIX", &forward_pipeline_record);
+		return value;
+	}();
+	return registry;
+}
+
+const PipelinePortRegistry& PipelineRouter::defaultPorts() {
+	static const auto registry = [] {
+		PipelinePortRegistry value;
+		value.registerPort("traces", "otel.trace");
+		value.registerPort("metrics", "otel.metrics");
+		value.registerPort("logs", "otel.log");
+		return value;
+	}();
+	return registry;
 }
 
 seastar::future<> PipelineRouter::start() {
@@ -137,8 +206,8 @@ seastar::future<> PipelineRouter::start() {
 }
 
 void PipelineRouter::add(std::string_view tag, const StackLogFrame& frame) {
-	if (_source_stage != nullptr) {
-		_source_stage->process(tag, frame);
+	if (_has_source_stage) {
+		_plan.dispatch(_source_stage, tag, frame);
 	}
 }
 

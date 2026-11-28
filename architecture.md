@@ -82,10 +82,16 @@ Configuration:
   fan-out. Graphs containing transforms are rejected explicitly until
   transform execution is implemented.
 
-- Runtime components use a synchronous `PipelineStage` interface. Edges and
-  source output-port checks are built during listener startup; records are
-  dispatched without futures or per-record component allocation. ClickHouse
-  stages invoke the existing per-shard sink directly.
+- Runtime components use a dynamically constructed compiled execution plan.
+  Each node stores a process function, component state, and prebuilt numeric
+  edges. Source output-port checks are performed during dispatch without
+  virtual calls, futures, or per-record component allocation. ClickHouse
+  nodes invoke the existing per-shard sink directly.
+- Process functions and named ports are registered by type/name during
+  startup. Tagged edges are indexed by their runtime tag, so dispatch visits
+  only the matching edge bucket plus untagged edges instead of scanning every
+  outgoing edge. The base execution plan is independent of concrete sink and
+  source types.
 
 Output: ClickHouse sink (native TCP protocol):
 

@@ -3,6 +3,7 @@
 #include <vector>
 #include <memory>
 #include <unordered_map>
+#include <optional>
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
 #include <seastar/net/inet_address.hh>
@@ -15,71 +16,117 @@ namespace RapidIngestor{
 
 	class IProtocol;
 	class ClickHouseSink;
-	class PipelineStage;
+	class PipelineExecutionPlan;
+	using PipelineProcessFn = void (*)(PipelineExecutionPlan&, size_t, void*,
+		std::string_view, const StackLogFrame&);
 
-	struct PipelineEdge {
-		PipelineStage* target = nullptr;
+	class PipelineComponentRegistry {
+		public:
+			void registerType(seastar::sstring type, PipelineProcessFn process);
+			PipelineProcessFn processFor(std::string_view type) const;
+
+		private:
+			std::unordered_map<seastar::sstring, PipelineProcessFn> _factories;
+	};
+
+	class PipelinePortRegistry {
+		public:
+			void registerPort(seastar::sstring name, seastar::sstring tag);
+			std::optional<seastar::sstring> tagFor(std::string_view name) const;
+
+		private:
+			std::unordered_map<seastar::sstring, seastar::sstring> _tags;
+	};
+
+	struct PipelineStringHash {
+		using is_transparent = void;
+		size_t operator()(std::string_view value) const noexcept {
+			return std::hash<std::string_view>{}(value);
+		}
+		size_t operator()(const std::string& value) const noexcept {
+			return operator()(std::string_view(value));
+		}
+		size_t operator()(const seastar::sstring& value) const noexcept {
+			return operator()(std::string_view(value));
+		}
+	};
+
+	struct PipelineStringEqual {
+		using is_transparent = void;
+		bool operator()(std::string_view left, std::string_view right) const noexcept {
+			return left == right;
+		}
+	};
+
+	struct CompiledPipelineEdge {
+		size_t target = 0;
 		seastar::sstring port;
 	};
 
-	class PipelineStage {
+	class PipelineExecutionPlan {
 		public:
-			virtual ~PipelineStage() = default;
-			virtual void process(std::string_view tag,
-				const StackLogFrame& frame) = 0;
+			using ProcessFn = PipelineProcessFn;
 
-			void addDownstream(PipelineStage* target, seastar::sstring port = {}) {
-				_downstream.push_back({target, std::move(port)});
+			struct Node {
+				ProcessFn process = nullptr;
+				void* state = nullptr;
+				std::vector<CompiledPipelineEdge> outputs;
+				std::unordered_map<std::string, std::vector<size_t>,
+					PipelineStringHash, PipelineStringEqual>
+					outputs_by_tag;
+				std::vector<size_t> untagged_outputs;
+			};
+
+			size_t addNode(ProcessFn process, void* state) {
+				_nodes.push_back({process, state, {}, {}, {}});
+				return _nodes.size() - 1;
 			}
 
-		protected:
-			void emit(std::string_view tag, const StackLogFrame& frame) {
-				for (const auto& edge : _downstream) {
-					if (!edge.port.empty() &&
-						!matchesPort(edge.port, tag)) {
-						continue;
-					}
-					edge.target->process(tag, frame);
+			void connect(size_t source, size_t target, seastar::sstring port = {}) {
+				auto& node = _nodes[source];
+				const auto edge_index = node.outputs.size();
+				node.outputs.push_back({target, std::move(port)});
+				if (node.outputs.back().port.empty()) {
+					node.untagged_outputs.push_back(edge_index);
 				}
 			}
 
-		private:
-			static bool matchesPort(std::string_view port, std::string_view tag) {
-				return (port == "traces" && tag == "otel.trace") ||
-					(port == "metrics" && tag == "otel.metrics") ||
-					(port == "logs" && tag == "otel.log");
+			void dispatch(size_t node, std::string_view tag,
+				const StackLogFrame& frame) {
+				auto& current = _nodes[node];
+				current.process(*this, node, current.state, tag, frame);
 			}
 
-			std::vector<PipelineEdge> _downstream;
-	};
-
-	class PipelineForwardStage final : public PipelineStage {
-		public:
-			void process(std::string_view tag,
-				const StackLogFrame& frame) override {
-				emit(tag, frame);
+			void emit(size_t source, std::string_view tag,
+				const StackLogFrame& frame) {
+				auto& node = _nodes[source];
+				for (auto edge_index : node.untagged_outputs) {
+					dispatch(node.outputs[edge_index].target, tag, frame);
+				}
+				auto tagged = node.outputs_by_tag.find(tag);
+				if (tagged != node.outputs_by_tag.end()) {
+					for (auto edge_index : tagged->second) {
+						dispatch(node.outputs[edge_index].target, tag, frame);
+					}
+				}
 			}
-	};
 
-	class PipelineSinkStage final : public PipelineStage {
-		public:
-			explicit PipelineSinkStage(
-				seastar::lw_shared_ptr<ClickHouseSink> sink)
-				: _sink(std::move(sink)) {}
-
-			void process(std::string_view tag,
-				const StackLogFrame& frame) override;
-
-			ClickHouseSink& sink() const { return *_sink; }
+			void indexTaggedEdge(size_t source, std::string tag) {
+				auto& node = _nodes[source];
+				node.outputs_by_tag[std::move(tag)].push_back(
+					node.outputs.size() - 1);
+			}
 
 		private:
-			seastar::lw_shared_ptr<ClickHouseSink> _sink;
+			std::vector<Node> _nodes;
 	};
 
 	class PipelineRouter {
 		public:
 			PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
-				seastar::sstring source_id);
+				seastar::sstring source_id,
+				const PipelineComponentRegistry& components = defaultComponents(),
+				const PipelinePortRegistry& ports = defaultPorts());
 
 			seastar::future<> start();
 			void add(std::string_view tag, const StackLogFrame& frame);
@@ -91,11 +138,15 @@ namespace RapidIngestor{
 			std::vector<seastar::lw_shared_ptr<ClickHouseSink>> _sinks;
 			std::unordered_map<seastar::sstring, size_t> _sink_by_id;
 			std::unordered_map<seastar::sstring, size_t> _component_by_id;
-			std::unordered_map<seastar::sstring, PipelineStage*> _stages;
-			std::vector<std::unique_ptr<PipelineStage>> _stage_storage;
+			PipelineExecutionPlan _plan;
+			std::unordered_map<seastar::sstring, size_t> _stage_by_id;
 			std::vector<PipelineComponent> _components;
 			seastar::sstring _source_id;
-			PipelineStage* _source_stage = nullptr;
+			size_t _source_stage = 0;
+			bool _has_source_stage = false;
+
+			static const PipelineComponentRegistry& defaultComponents();
+			static const PipelinePortRegistry& defaultPorts();
 	};
 	typedef enum {
 		FORWARD_PROTOCOL
