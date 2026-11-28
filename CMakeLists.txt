@@ -85,3 +85,16 @@ target_compile_definitions(pipeline_router_factory_test PRIVATE
         SEASTAR_SCHEDULING_GROUPS_COUNT=16)
 add_test(NAME pipeline_router_factory_test
         COMMAND pipeline_router_factory_test)
+
+add_executable(config_pipeline_test
+        tests/config_pipeline_test.cc)
+target_include_directories(config_pipeline_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/seastar/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/json/include)
+target_compile_definitions(config_pipeline_test PRIVATE
+        SEASTAR_SSTRING SEASTAR_HEAPPROF
+        SEASTAR_SCHEDULING_GROUPS_COUNT=16)
+target_link_libraries(config_pipeline_test PRIVATE Seastar::seastar)
+add_test(NAME config_pipeline_test
+        COMMAND config_pipeline_test)
