@@ -22,11 +22,31 @@ namespace RapidIngestor{
 
 	class PipelineComponentRegistry {
 		public:
+			struct Instance {
+				PipelineProcessFn process = nullptr;
+				void* state = nullptr;
+				std::shared_ptr<void> owner;
+				using StartFn = seastar::future<> (*)(void*);
+				using OverloadedFn = bool (*)(const void*);
+				using WaitFn = seastar::future<> (*)(void*);
+				using RowsFn = uint64_t (*)(const void*);
+				StartFn start = nullptr;
+				OverloadedFn overloaded = nullptr;
+				WaitFn waitForCapacity = nullptr;
+				RowsFn rowsInserted = nullptr;
+			};
+			using FactoryFn = Instance (*)(const PipelineComponent&, const Sink*);
+
 			void registerType(seastar::sstring type, PipelineProcessFn process);
+			void registerFactory(seastar::sstring type, FactoryFn factory);
 			PipelineProcessFn processFor(std::string_view type) const;
+			bool hasType(std::string_view type) const;
+			Instance create(const PipelineComponent& component,
+				const Sink* config) const;
 
 		private:
 			std::unordered_map<seastar::sstring, PipelineProcessFn> _factories;
+			std::unordered_map<seastar::sstring, FactoryFn> _component_factories;
 	};
 
 	class PipelinePortRegistry {
@@ -135,7 +155,7 @@ namespace RapidIngestor{
 			uint64_t rowsInserted() const;
 
 		private:
-			std::vector<seastar::lw_shared_ptr<ClickHouseSink>> _sinks;
+			std::vector<PipelineComponentRegistry::Instance> _instances;
 			std::unordered_map<seastar::sstring, size_t> _sink_by_id;
 			std::unordered_map<seastar::sstring, size_t> _component_by_id;
 			PipelineExecutionPlan _plan;

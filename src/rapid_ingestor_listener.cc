@@ -20,10 +20,40 @@ void PipelineComponentRegistry::registerType(
 	}
 }
 
+void PipelineComponentRegistry::registerFactory(
+	seastar::sstring type, FactoryFn factory) {
+	if (!factory || type.empty()) {
+		throw std::invalid_argument("pipeline component factory is invalid");
+	}
+	if (!_component_factories.emplace(std::move(type), factory).second) {
+		throw std::invalid_argument("duplicate pipeline component factory");
+	}
+}
+
 PipelineProcessFn PipelineComponentRegistry::processFor(
 	std::string_view type) const {
 	auto it = _factories.find(seastar::sstring(type));
 	return it == _factories.end() ? nullptr : it->second;
+}
+
+bool PipelineComponentRegistry::hasType(std::string_view type) const {
+	auto key = seastar::sstring(type);
+	return _factories.find(key) != _factories.end() ||
+		_component_factories.find(key) != _component_factories.end();
+}
+
+PipelineComponentRegistry::Instance PipelineComponentRegistry::create(
+	const PipelineComponent& component, const Sink* config) const {
+	auto factory = _component_factories.find(component.type);
+	if (factory != _component_factories.end()) {
+		return factory->second(component, config);
+	}
+	auto process = processFor(component.type);
+	if (!process) {
+		throw std::invalid_argument(fmt::format(
+			"runtime component type '{}' is not registered", component.type));
+	}
+	return {process, nullptr, {}, nullptr, nullptr, nullptr, nullptr};
 }
 
 void PipelinePortRegistry::registerPort(
@@ -53,6 +83,38 @@ void sink_pipeline_record(PipelineExecutionPlan&,
 	size_t, void* state, std::string_view tag, const StackLogFrame& frame) {
 	static_cast<ClickHouseSink*>(state)->add(tag, frame);
 }
+
+seastar::future<> clickhouse_start(void* state) {
+	return static_cast<ClickHouseSink*>(state)->start();
+}
+bool clickhouse_overloaded(const void* state) {
+	return static_cast<const ClickHouseSink*>(state)->isOverloaded();
+}
+seastar::future<> clickhouse_wait(void* state) {
+	return static_cast<ClickHouseSink*>(state)->waitForCapacity();
+}
+uint64_t clickhouse_rows(const void* state) {
+	return static_cast<const ClickHouseSink*>(state)->getRowsInserted();
+}
+
+struct ClickHouseOwner {
+	seastar::lw_shared_ptr<ClickHouseSink> sink;
+};
+
+PipelineComponentRegistry::Instance clickhouse_factory(
+	const PipelineComponent&, const Sink* config) {
+	if (!config) {
+		throw std::invalid_argument("ClickHouse factory requires sink configuration");
+	}
+	auto* owner = new ClickHouseOwner{
+		seastar::make_lw_shared<ClickHouseSink>(*config)};
+	std::shared_ptr<void> lifetime(owner, [](void* value) {
+		delete static_cast<ClickHouseOwner*>(value);
+	});
+	return {&sink_pipeline_record, owner->sink.get(), std::move(lifetime),
+		&clickhouse_start, &clickhouse_overloaded, &clickhouse_wait,
+		&clickhouse_rows};
+}
 }
 
 PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
@@ -61,7 +123,7 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 	: _components(graph.components()), _source_id(std::move(source_id)) {
 	for (size_t i = 0; i < _components.size(); ++i) {
 		_component_by_id.emplace(_components[i].id, i);
-		if (!components.processFor(_components[i].type)) {
+		if (!components.hasType(_components[i].type)) {
 			throw std::invalid_argument(fmt::format(
 				"runtime pipeline component '{}' of type '{}' is not registered",
 				_components[i].id, _components[i].type));
@@ -112,29 +174,44 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 			return false;
 		};
 
-	for (const auto& sink_config : sinks) {
+	std::unordered_set<seastar::sstring> reachable_sinks;
+	for (const auto& sink : sinks) {
 		std::unordered_set<seastar::sstring> visiting;
-		if (!is_reachable(sink_config.id, visiting)) {
-			continue;
+		if (is_reachable(sink.id, visiting)) {
+			reachable_sinks.insert(sink.id);
 		}
-		auto sink = seastar::make_lw_shared<ClickHouseSink>(sink_config);
-		_sink_by_id.emplace(sink_config.id, _sinks.size());
-		_sinks.push_back(std::move(sink));
 	}
 
 	for (const auto& component : _components) {
-		if (component.type == "clickhouse") {
-			auto sink_it = _sink_by_id.find(component.id);
-			if (sink_it == _sink_by_id.end()) {
-				continue;
+		const Sink* sink_config = nullptr;
+		for (const auto& candidate : sinks) {
+			if (candidate.id == component.id) {
+				sink_config = &candidate;
+				break;
 			}
-			auto node = _plan.addNode(&sink_pipeline_record,
-				_sinks[sink_it->second].get());
-			_stage_by_id.emplace(component.id, node);
-		} else {
-			auto node = _plan.addNode(components.processFor(component.type), nullptr);
-			_stage_by_id.emplace(component.id, node);
 		}
+		if (sink_config && !reachable_sinks.contains(component.id)) {
+			continue;
+		}
+		auto instance = components.create(component, sink_config);
+		if (!instance.process) {
+			throw std::invalid_argument(fmt::format(
+				"runtime component '{}' factory returned no process function",
+				component.id));
+		}
+		auto index = _instances.size();
+		_instances.push_back(std::move(instance));
+		_sink_by_id.emplace(component.id, index);
+	}
+
+	for (const auto& component : _components) {
+		auto instance_it = _sink_by_id.find(component.id);
+		if (instance_it == _sink_by_id.end()) {
+			continue;
+		}
+		auto& instance = _instances[instance_it->second];
+		auto node = _plan.addNode(instance.process, instance.state);
+		_stage_by_id.emplace(component.id, node);
 	}
 
 	for (const auto& component : _components) {
@@ -175,7 +252,7 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 const PipelineComponentRegistry& PipelineRouter::defaultComponents() {
 	static const auto registry = [] {
 		PipelineComponentRegistry value;
-		value.registerType("clickhouse", &sink_pipeline_record);
+		value.registerFactory("clickhouse", &clickhouse_factory);
 		value.registerType("otel", &forward_pipeline_record);
 		value.registerType("opentelemetry", &forward_pipeline_record);
 		value.registerType("forward", &forward_pipeline_record);
@@ -199,8 +276,10 @@ const PipelinePortRegistry& PipelineRouter::defaultPorts() {
 }
 
 seastar::future<> PipelineRouter::start() {
-	for (auto& sink : _sinks) {
-		co_await sink->start();
+	for (auto& instance : _instances) {
+		if (instance.start) {
+			co_await instance.start(instance.state);
+		}
 	}
 	co_return;
 }
@@ -212,22 +291,26 @@ void PipelineRouter::add(std::string_view tag, const StackLogFrame& frame) {
 }
 
 bool PipelineRouter::isOverloaded() const {
-	return std::any_of(_sinks.begin(), _sinks.end(),
-		[](const auto& sink) { return sink->isOverloaded(); });
+	return std::any_of(_instances.begin(), _instances.end(),
+		[](const auto& instance) {
+			return instance.overloaded && instance.overloaded(instance.state);
+		});
 }
 
 seastar::future<> PipelineRouter::waitForCapacity() {
-	for (auto& sink : _sinks) {
-		if (sink->isOverloaded()) {
-			co_await sink->waitForCapacity();
+	for (auto& instance : _instances) {
+		if (instance.overloaded && instance.overloaded(instance.state)) {
+			co_await instance.waitForCapacity(instance.state);
 		}
 	}
 }
 
 uint64_t PipelineRouter::rowsInserted() const {
 	uint64_t rows = 0;
-	for (const auto& sink : _sinks) {
-		rows += sink->getRowsInserted();
+	for (const auto& instance : _instances) {
+		if (instance.rowsInserted) {
+			rows += instance.rowsInserted(instance.state);
+		}
 	}
 	return rows;
 }

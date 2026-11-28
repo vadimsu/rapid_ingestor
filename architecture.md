@@ -92,6 +92,9 @@ Configuration:
   only the matching edge bucket plus untagged edges instead of scanning every
   outgoing edge. The base execution plan is independent of concrete sink and
   source types.
+- Factories return opaque runtime instances containing the process callback,
+  state ownership, lifecycle, backpressure, and statistics callbacks. The
+  router therefore does not construct concrete sink objects directly.
 
 Output: ClickHouse sink (native TCP protocol):
 

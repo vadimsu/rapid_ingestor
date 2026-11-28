@@ -62,3 +62,8 @@ at startup. Tagged edges are compiled into `tag -> edge-index` buckets, while
 untagged edges use a separate direct bucket. Consequently, a record does not
 scan all outgoing edges to find matching ports; adding a new component or
 declared port does not require changing the execution-plan base class.
+
+Component factories own runtime state and expose lifecycle, backpressure, and
+statistics callbacks through opaque instances. The router does not construct
+or manage a concrete sink type; adding another sink requires registering its
+factory and callbacks rather than modifying the execution plan.
