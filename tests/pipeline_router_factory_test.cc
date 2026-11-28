@@ -46,7 +46,10 @@ RapidIngestor::PipelineComponentRegistry::Instance filter_factory(
 	const RapidIngestor::PipelineComponent& component, const RapidIngestor::Sink*) {
 	auto* state = new FilterState{
 		{std::string(component.filter_field),
-			std::string(component.filter_equals)}};
+			std::string(component.filter_equals),
+			component.filter_integer,
+			component.filter_boolean,
+			component.filter_kind}};
 	std::shared_ptr<void> owner(state, [](void* raw) {
 		delete static_cast<FilterState*>(raw);
 	});
@@ -60,6 +63,31 @@ RapidIngestor::StackLogFrame frame(std::string_view status) {
 	value.elements[0] = {
 		RapidIngestor::MsgPackType::String, "status", status};
 	return value;
+}
+
+RapidIngestor::StackLogFrame integer_frame(int32_t attempts) {
+	static thread_local char value[sizeof(attempts)];
+	value[0] = static_cast<char>((attempts >> 24) & 0xff);
+	value[1] = static_cast<char>((attempts >> 16) & 0xff);
+	value[2] = static_cast<char>((attempts >> 8) & 0xff);
+	value[3] = static_cast<char>(attempts & 0xff);
+	RapidIngestor::StackLogFrame result;
+	result.count = 1;
+	result.elements[0] = {
+		RapidIngestor::MsgPackType::Integer, "attempts",
+		std::string_view(value, sizeof(value))};
+	return result;
+}
+
+RapidIngestor::StackLogFrame boolean_frame(bool enabled) {
+	static thread_local char value;
+	value = enabled ? 1 : 0;
+	RapidIngestor::StackLogFrame result;
+	result.count = 1;
+	result.elements[0] = {
+		RapidIngestor::MsgPackType::Boolean, "enabled",
+		std::string_view(&value, 1)};
+	return result;
 }
 
 }
@@ -99,6 +127,40 @@ int main() {
 	router.add("otel.trace", frame("error"));
 	if (router.rowsInserted() != 2) {
 		std::cerr << "matching record did not fan out to both sinks\n";
+		return 1;
+	}
+
+	PipelineGraph typed_graph;
+	typed_graph.add({"source", "opentelemetry", {}});
+	typed_graph.add({"keep_attempts", "filter", {"source.traces"},
+		"attempts", {}, 42, false, PipelineFilterValueKind::Integer});
+	typed_graph.add({"typed_sink", "memory_sink", {"keep_attempts"}});
+	typed_graph.validate();
+	Sink typed_sink;
+	typed_sink.id = "typed_sink";
+	PipelineRouter typed_router({typed_sink}, std::move(typed_graph), "source",
+		components, ports);
+	typed_router.add("otel.trace", integer_frame(41));
+	typed_router.add("otel.trace", integer_frame(42));
+	if (typed_router.rowsInserted() != 1) {
+		std::cerr << "integer filter did not match through router\n";
+		return 1;
+	}
+
+	PipelineGraph boolean_graph;
+	boolean_graph.add({"source", "opentelemetry", {}});
+	boolean_graph.add({"keep_enabled", "filter", {"source.traces"},
+		"enabled", {}, 0, true, PipelineFilterValueKind::Boolean});
+	boolean_graph.add({"boolean_sink", "memory_sink", {"keep_enabled"}});
+	boolean_graph.validate();
+	Sink boolean_sink;
+	boolean_sink.id = "boolean_sink";
+	PipelineRouter boolean_router({boolean_sink}, std::move(boolean_graph), "source",
+		components, ports);
+	boolean_router.add("otel.trace", boolean_frame(false));
+	boolean_router.add("otel.trace", boolean_frame(true));
+	if (boolean_router.rowsInserted() != 1) {
+		std::cerr << "boolean filter did not match through router\n";
 		return 1;
 	}
 

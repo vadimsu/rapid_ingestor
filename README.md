@@ -45,9 +45,9 @@ source output ports for OTLP are `traces`, `metrics`, and `logs`.
 
 Configuration loading validates component IDs, references, OTLP output ports,
 cycles, and deterministic topological ordering. Runtime routing follows the
-compiled graph and supports sink fan-out. The synchronous `filter` transform
-is supported for exact string equality predicates; other transform types are
-still rejected explicitly until their execution semantics are implemented:
+compiled graph and supports sink fan-out. The synchronous `filter` transform is supported for exact equality predicates
+over strings, signed integers, and booleans; other transform types are still
+rejected explicitly until their execution semantics are implemented:
 
 ```json
 {

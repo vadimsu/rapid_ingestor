@@ -132,7 +132,10 @@ PipelineComponentRegistry::Instance filter_factory(
 	}
 	auto* state = new PipelineStringFilter{
 		std::string(component.filter_field),
-		std::string(component.filter_equals)};
+		std::string(component.filter_equals),
+		component.filter_integer,
+		component.filter_boolean,
+		component.filter_kind};
 	std::shared_ptr<void> lifetime(state, [](void* value) {
 		delete static_cast<PipelineStringFilter*>(value);
 	});

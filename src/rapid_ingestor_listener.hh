@@ -23,11 +23,28 @@ namespace RapidIngestor{
 	struct PipelineStringFilter {
 		std::string field;
 		std::string expected;
+		int64_t expected_integer = 0;
+		bool expected_boolean = false;
+		PipelineFilterValueKind kind = PipelineFilterValueKind::String;
 
 		bool matches(const StackLogFrame& frame) const {
 			auto value = frame.find(field);
-			return value && value->type == MsgPackType::String &&
-				value->val == expected;
+			if (!value) {
+				return false;
+			}
+			switch (kind) {
+				case PipelineFilterValueKind::String:
+					return value->type == MsgPackType::String &&
+						value->val == expected;
+				case PipelineFilterValueKind::Integer:
+					return value->type == MsgPackType::Integer &&
+						value->as_int() == expected_integer;
+				case PipelineFilterValueKind::Boolean:
+					return value->type == MsgPackType::Boolean &&
+						!value->val.empty() &&
+						(value->val[0] != 0) == expected_boolean;
+			}
+			return false;
 		}
 	};
 

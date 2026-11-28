@@ -17,12 +17,17 @@
 namespace fs = std::filesystem;
 
 namespace RapidIngestor{
+	enum class PipelineFilterValueKind : uint8_t { String, Integer, Boolean };
+
 	struct PipelineComponent {
 		seastar::sstring id;
 		seastar::sstring type;
 		std::vector<seastar::sstring> inputs;
 		seastar::sstring filter_field;
 		seastar::sstring filter_equals;
+		int64_t filter_integer = 0;
+		bool filter_boolean = false;
+		PipelineFilterValueKind filter_kind = PipelineFilterValueKind::String;
 	};
 
 	class PipelineGraph {
@@ -439,10 +444,29 @@ namespace RapidIngestor{
 		        						"filter '{}' requires an object condition", id));
 		        				}
 		        				component.filter_field = string_value(*condition, "field");
-		        				component.filter_equals = string_value(*condition, "equals");
 		        				if (component.filter_field.empty()) {
 		        					throw std::invalid_argument(fmt::format(
 		        						"filter '{}' requires condition.field", id));
+		        				}
+		        				auto equals = condition->find("equals");
+		        				if (equals == condition->end()) {
+		        						throw std::invalid_argument(fmt::format(
+		        							"filter '{}' requires condition.equals", id));
+		        				}
+		        				if (equals->is_string()) {
+		        						component.filter_equals = equals->get<std::string>();
+		        				} else if (equals->is_number_integer()) {
+		        						component.filter_kind =
+		        							PipelineFilterValueKind::Integer;
+		        						component.filter_integer = equals->get<int64_t>();
+		        				} else if (equals->is_boolean()) {
+		        						component.filter_kind =
+		        							PipelineFilterValueKind::Boolean;
+		        						component.filter_boolean = equals->get<bool>();
+		        				} else {
+		        						throw std::invalid_argument(fmt::format(
+		        							"filter '{}' condition.equals must be a string, integer, or boolean",
+		        							id));
 		        				}
 		        			}
 		        			_pipeline.add(std::move(component));

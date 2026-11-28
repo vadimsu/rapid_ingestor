@@ -38,6 +38,35 @@ int main() {
 		return 1;
 	}
 
+	alignas(int32_t) static const char integer_bytes[] = {0, 0, 0, 42};
+	StackLogFrame integer_frame;
+	integer_frame.count = 1;
+	integer_frame.elements[0] = {
+		MsgPackType::Integer, "attempts",
+		std::string_view(integer_bytes, sizeof(integer_bytes))};
+	PipelineStringFilter integer_filter;
+	integer_filter.field = "attempts";
+	integer_filter.kind = PipelineFilterValueKind::Integer;
+	integer_filter.expected_integer = 42;
+	if (!integer_filter.matches(integer_frame)) {
+		std::cerr << "integer filter predicate test failed\n";
+		return 1;
+	}
+
+	static const char true_byte = 1;
+	StackLogFrame boolean_frame;
+	boolean_frame.count = 1;
+	boolean_frame.elements[0] = {
+		MsgPackType::Boolean, "enabled", std::string_view(&true_byte, 1)};
+	PipelineStringFilter boolean_filter;
+	boolean_filter.field = "enabled";
+	boolean_filter.kind = PipelineFilterValueKind::Boolean;
+	boolean_filter.expected_boolean = true;
+	if (!boolean_filter.matches(boolean_frame)) {
+		std::cerr << "boolean filter predicate test failed\n";
+		return 1;
+	}
+
 	PipelineExecutionPlan plan;
 	Counter untagged;
 	Counter traces;
