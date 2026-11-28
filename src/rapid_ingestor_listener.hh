@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <memory>
 #include <unordered_map>
 #include <seastar/core/seastar.hh>
 #include "seastar/net/api.hh"
@@ -14,6 +15,67 @@ namespace RapidIngestor{
 
 	class IProtocol;
 	class ClickHouseSink;
+	class PipelineStage;
+
+	struct PipelineEdge {
+		PipelineStage* target = nullptr;
+		seastar::sstring port;
+	};
+
+	class PipelineStage {
+		public:
+			virtual ~PipelineStage() = default;
+			virtual void process(std::string_view tag,
+				const StackLogFrame& frame) = 0;
+
+			void addDownstream(PipelineStage* target, seastar::sstring port = {}) {
+				_downstream.push_back({target, std::move(port)});
+			}
+
+		protected:
+			void emit(std::string_view tag, const StackLogFrame& frame) {
+				for (const auto& edge : _downstream) {
+					if (!edge.port.empty() &&
+						!matchesPort(edge.port, tag)) {
+						continue;
+					}
+					edge.target->process(tag, frame);
+				}
+			}
+
+		private:
+			static bool matchesPort(std::string_view port, std::string_view tag) {
+				return (port == "traces" && tag == "otel.trace") ||
+					(port == "metrics" && tag == "otel.metrics") ||
+					(port == "logs" && tag == "otel.log");
+			}
+
+			std::vector<PipelineEdge> _downstream;
+	};
+
+	class PipelineForwardStage final : public PipelineStage {
+		public:
+			void process(std::string_view tag,
+				const StackLogFrame& frame) override {
+				emit(tag, frame);
+			}
+	};
+
+	class PipelineSinkStage final : public PipelineStage {
+		public:
+			explicit PipelineSinkStage(
+				seastar::lw_shared_ptr<ClickHouseSink> sink)
+				: _sink(std::move(sink)) {}
+
+			void process(std::string_view tag,
+				const StackLogFrame& frame) override;
+
+			ClickHouseSink& sink() const { return *_sink; }
+
+		private:
+			seastar::lw_shared_ptr<ClickHouseSink> _sink;
+	};
+
 	class PipelineRouter {
 		public:
 			PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
@@ -26,20 +88,14 @@ namespace RapidIngestor{
 			uint64_t rowsInserted() const;
 
 		private:
-			struct Edge {
-				size_t target;
-				seastar::sstring port;
-			};
-
-			void visit(size_t component, std::string_view tag,
-				const StackLogFrame& frame, std::vector<bool>& visited);
-
 			std::vector<seastar::lw_shared_ptr<ClickHouseSink>> _sinks;
 			std::unordered_map<seastar::sstring, size_t> _sink_by_id;
 			std::unordered_map<seastar::sstring, size_t> _component_by_id;
-			std::unordered_map<seastar::sstring, std::vector<Edge>> _edges;
+			std::unordered_map<seastar::sstring, PipelineStage*> _stages;
+			std::vector<std::unique_ptr<PipelineStage>> _stage_storage;
 			std::vector<PipelineComponent> _components;
 			seastar::sstring _source_id;
+			PipelineStage* _source_stage = nullptr;
 	};
 	typedef enum {
 		FORWARD_PROTOCOL

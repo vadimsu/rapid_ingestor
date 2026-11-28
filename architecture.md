@@ -82,6 +82,11 @@ Configuration:
   fan-out. Graphs containing transforms are rejected explicitly until
   transform execution is implemented.
 
+- Runtime components use a synchronous `PipelineStage` interface. Edges and
+  source output-port checks are built during listener startup; records are
+  dispatched without futures or per-record component allocation. ClickHouse
+  stages invoke the existing per-shard sink directly.
+
 Output: ClickHouse sink (native TCP protocol):
 
 - `native_protocol.hh` is a minimal, reusable ClickHouse native-TCP-protocol client (handshake, `executeQuery` for DDL, a Block decoder, and `insertRows()` for an arbitrary ordered set of String/Int64/UInt8-typed columns)

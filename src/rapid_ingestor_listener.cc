@@ -10,6 +10,11 @@
 
 namespace RapidIngestor{
 
+void PipelineSinkStage::process(std::string_view tag,
+	const StackLogFrame& frame) {
+	_sink->add(tag, frame);
+}
+
 PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 	seastar::sstring source_id)
 	: _components(graph.components()), _source_id(std::move(source_id)) {
@@ -39,10 +44,7 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 			if (upstream_it == _component_by_id.end()) {
 				continue;
 			}
-			_edges[upstream].push_back({
-				_component_by_id.at(component.id),
-				has_port ? seastar::sstring(input.data() + separator + 1,
-					input.size() - separator - 1) : seastar::sstring{}});
+			// Edges are connected after stage construction below.
 		}
 	}
 
@@ -51,30 +53,80 @@ PipelineRouter::PipelineRouter(std::vector<Sink> sinks, PipelineGraph graph,
 			"runtime source '{}' is not present in the pipeline graph", _source_id));
 	}
 
-	std::unordered_set<seastar::sstring> reachable;
-	std::function<void(const seastar::sstring&)> mark_reachable =
-		[&](const seastar::sstring& component_id) {
-			if (!reachable.insert(component_id).second) {
-				return;
+	std::function<bool(const seastar::sstring&,
+		std::unordered_set<seastar::sstring>&)> is_reachable =
+		[&](const seastar::sstring& component_id,
+			std::unordered_set<seastar::sstring>& visiting) {
+			if (component_id == _source_id) {
+				return true;
 			}
-			auto edge_it = _edges.find(component_id);
-			if (edge_it == _edges.end()) {
-				return;
+			if (!visiting.insert(component_id).second) {
+				return false;
 			}
-			for (const auto& edge : edge_it->second) {
-				mark_reachable(_components[edge.target].id);
+			auto component_it = _component_by_id.find(component_id);
+			if (component_it == _component_by_id.end()) {
+				return false;
 			}
+			for (const auto& input : _components[component_it->second].inputs) {
+				auto separator = input.find('.');
+				auto upstream = separator == seastar::sstring::npos
+					? input : seastar::sstring(input.data(), separator);
+				if (is_reachable(upstream, visiting)) {
+					return true;
+				}
+			}
+			return false;
 		};
-	mark_reachable(_source_id);
 
 	for (const auto& sink_config : sinks) {
-		if (!reachable.contains(sink_config.id)) {
+		std::unordered_set<seastar::sstring> visiting;
+		if (!is_reachable(sink_config.id, visiting)) {
 			continue;
 		}
 		auto sink = seastar::make_lw_shared<ClickHouseSink>(sink_config);
 		_sink_by_id.emplace(sink_config.id, _sinks.size());
 		_sinks.push_back(std::move(sink));
 	}
+
+	for (const auto& component : _components) {
+		if (component.type == "clickhouse") {
+			auto sink_it = _sink_by_id.find(component.id);
+			if (sink_it == _sink_by_id.end()) {
+				continue;
+			}
+			auto stage = std::make_unique<PipelineSinkStage>(
+				_sinks[sink_it->second]);
+			_stages.emplace(component.id, stage.get());
+			_stage_storage.push_back(std::move(stage));
+		} else {
+			auto stage = std::make_unique<PipelineForwardStage>();
+			_stages.emplace(component.id, stage.get());
+			_stage_storage.push_back(std::move(stage));
+		}
+	}
+
+	for (const auto& component : _components) {
+		auto target_it = _stages.find(component.id);
+		if (target_it == _stages.end()) {
+			continue;
+		}
+		for (const auto& input : component.inputs) {
+			auto separator = input.find('.');
+			const bool has_port = separator != seastar::sstring::npos;
+			auto upstream = has_port
+				? seastar::sstring(input.data(), separator) : input;
+			auto upstream_it = _stages.find(upstream);
+			if (upstream_it == _stages.end()) {
+				continue;
+			}
+			auto port = has_port
+				? seastar::sstring(input.data() + separator + 1,
+					input.size() - separator - 1)
+				: seastar::sstring{};
+			upstream_it->second->addDownstream(target_it->second, std::move(port));
+		}
+	}
+	_source_stage = _stages.at(_source_id);
 }
 
 seastar::future<> PipelineRouter::start() {
@@ -84,47 +136,10 @@ seastar::future<> PipelineRouter::start() {
 	co_return;
 }
 
-void PipelineRouter::visit(size_t component, std::string_view tag,
-	const StackLogFrame& frame, std::vector<bool>& visited) {
-	if (visited[component]) {
-		return;
-	}
-	visited[component] = true;
-	const auto& current = _components[component];
-	if (current.type == "clickhouse") {
-		auto sink_it = _sink_by_id.find(current.id);
-		if (sink_it == _sink_by_id.end()) {
-			throw std::logic_error(fmt::format(
-				"pipeline sink '{}' has no runtime sink", current.id));
-		}
-		_sinks[sink_it->second]->add(tag, frame);
-		return;
-	}
-	auto edge_it = _edges.find(current.id);
-	if (edge_it == _edges.end()) {
-		return;
-	}
-	for (const auto& edge : edge_it->second) {
-		if (!edge.port.empty()) {
-			const bool matches =
-				(edge.port == "traces" && tag == "otel.trace") ||
-				(edge.port == "metrics" && tag == "otel.metrics") ||
-				(edge.port == "logs" && tag == "otel.log");
-			if (!matches) {
-				continue;
-			}
-		}
-		visit(edge.target, tag, frame, visited);
-	}
-}
-
 void PipelineRouter::add(std::string_view tag, const StackLogFrame& frame) {
-	auto source_it = _component_by_id.find(_source_id);
-	if (source_it == _component_by_id.end()) {
-		return;
+	if (_source_stage != nullptr) {
+		_source_stage->process(tag, frame);
 	}
-	std::vector<bool> visited(_components.size(), false);
-	visit(source_it->second, tag, frame, visited);
 }
 
 bool PipelineRouter::isOverloaded() const {

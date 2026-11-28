@@ -49,3 +49,9 @@ validated but are not executed by the current runtime yet. Runtime routing
 now follows the compiled graph and supports sink fan-out, but a graph
 containing transforms is rejected explicitly until transform execution is
 implemented.
+
+Runtime routing is built from synchronous `PipelineStage` components. Source
+and pass-through stages dispatch through prebuilt downstream edges, while
+ClickHouse stages call the existing synchronous sink API directly. No future,
+per-record heap allocation, or cross-core handoff is introduced by this
+component layer.
