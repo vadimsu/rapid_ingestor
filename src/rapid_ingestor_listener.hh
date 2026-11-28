@@ -20,6 +20,17 @@ namespace RapidIngestor{
 	using PipelineProcessFn = void (*)(PipelineExecutionPlan&, size_t, void*,
 		std::string_view, const StackLogFrame&);
 
+	struct PipelineStringFilter {
+		std::string field;
+		std::string expected;
+
+		bool matches(const StackLogFrame& frame) const {
+			auto value = frame.find(field);
+			return value && value->type == MsgPackType::String &&
+				value->val == expected;
+		}
+	};
+
 	class PipelineComponentRegistry {
 		public:
 			struct Instance {

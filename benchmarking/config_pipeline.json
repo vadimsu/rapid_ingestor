@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "sources": {
+    "otel_in": {
+      "type": "opentelemetry",
+      "grpc": { "address": "127.0.0.1:14317" }
+    }
+  },
+  "transforms": {
+    "keep_traces": {
+      "type": "filter",
+      "inputs": ["otel_in.traces"],
+      "condition": {
+        "field": "payload",
+        "equals": "{}"
+      }
+    }
+  },
+  "sinks": {
+    "clickhouse": {
+      "type": "clickhouse",
+      "inputs": ["keep_traces"],
+      "database_table": "otel_pipeline",
+      "host": "127.0.0.1",
+      "port": 9000
+    }
+  }
+}

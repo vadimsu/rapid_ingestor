@@ -21,6 +21,8 @@ namespace RapidIngestor{
 		seastar::sstring id;
 		seastar::sstring type;
 		std::vector<seastar::sstring> inputs;
+		seastar::sstring filter_field;
+		seastar::sstring filter_equals;
 	};
 
 	class PipelineGraph {
@@ -429,7 +431,21 @@ namespace RapidIngestor{
 		        				throw std::invalid_argument(fmt::format(
 		        					"transform '{}' has unsupported type '{}'", id, type));
 		        			}
-		        			_pipeline.add({id, type, inputs_value(value)});
+		        			PipelineComponent component{id, type, inputs_value(value)};
+		        			if (type == "filter") {
+		        				auto condition = value.find("condition");
+		        				if (condition == value.end() || !condition->is_object()) {
+		        					throw std::invalid_argument(fmt::format(
+		        						"filter '{}' requires an object condition", id));
+		        				}
+		        				component.filter_field = string_value(*condition, "field");
+		        				component.filter_equals = string_value(*condition, "equals");
+		        				if (component.filter_field.empty()) {
+		        					throw std::invalid_argument(fmt::format(
+		        						"filter '{}' requires condition.field", id));
+		        				}
+		        			}
+		        			_pipeline.add(std::move(component));
 		        		}
 		        	}
 			void process_sources(nlohmann::json& jsonPayload){

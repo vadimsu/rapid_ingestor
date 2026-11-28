@@ -44,11 +44,18 @@ source output ports for OTLP are `traces`, `metrics`, and `logs`.
 ```
 
 Configuration loading validates component IDs, references, OTLP output ports,
-cycles, and deterministic topological ordering. Transforms are compiled and
-validated but are not executed by the current runtime yet. Runtime routing
-now follows the compiled graph and supports sink fan-out, but a graph
-containing transforms is rejected explicitly until transform execution is
-implemented.
+cycles, and deterministic topological ordering. Runtime routing follows the
+compiled graph and supports sink fan-out. The synchronous `filter` transform
+is supported for exact string equality predicates; other transform types are
+still rejected explicitly until their execution semantics are implemented:
+
+```json
+{
+  "type": "filter",
+  "inputs": ["otel_in.traces"],
+  "condition": { "field": "severity", "equals": "error" }
+}
+```
 
 Runtime routing is built from a dynamically constructed but compiled
 execution plan. Each node stores a preselected process function and opaque

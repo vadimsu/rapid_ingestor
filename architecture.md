@@ -79,8 +79,9 @@ Configuration:
 	- `config_multi_column_aliasing.json` - multi-column mode focused purely on explicit aliasing (every `source` field renamed to a differently-named `target_column`)
 - The current runtime adapter still starts the first usable source and first
   sink. Runtime routing now follows the compiled graph and supports sink
-  fan-out. Graphs containing transforms are rejected explicitly until
-  transform execution is implemented.
+  fan-out. The runtime supports synchronous exact-string `filter` transforms;
+  other transform types are rejected explicitly until their execution
+  semantics are implemented.
 
 - Runtime components use a dynamically constructed compiled execution plan.
   Each node stores a process function, component state, and prebuilt numeric

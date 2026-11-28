@@ -79,6 +79,14 @@ void forward_pipeline_record(PipelineExecutionPlan& plan, size_t node,
 	plan.emit(node, tag, frame);
 }
 
+void filter_pipeline_record(PipelineExecutionPlan& plan, size_t node,
+	void* raw_state, std::string_view tag, const StackLogFrame& frame) {
+	auto* state = static_cast<const PipelineStringFilter*>(raw_state);
+	if (state->matches(frame)) {
+		plan.emit(node, tag, frame);
+	}
+}
+
 void sink_pipeline_record(PipelineExecutionPlan&,
 	size_t, void* state, std::string_view tag, const StackLogFrame& frame) {
 	static_cast<ClickHouseSink*>(state)->add(tag, frame);
@@ -114,6 +122,22 @@ PipelineComponentRegistry::Instance clickhouse_factory(
 	return {&sink_pipeline_record, owner->sink.get(), std::move(lifetime),
 		&clickhouse_start, &clickhouse_overloaded, &clickhouse_wait,
 		&clickhouse_rows};
+}
+
+PipelineComponentRegistry::Instance filter_factory(
+	const PipelineComponent& component, const Sink*) {
+	if (component.filter_field.empty()) {
+		throw std::invalid_argument(fmt::format(
+			"filter '{}' has no field predicate", component.id));
+	}
+	auto* state = new PipelineStringFilter{
+		std::string(component.filter_field),
+		std::string(component.filter_equals)};
+	std::shared_ptr<void> lifetime(state, [](void* value) {
+		delete static_cast<PipelineStringFilter*>(value);
+	});
+	return {&filter_pipeline_record, state, std::move(lifetime),
+		nullptr, nullptr, nullptr, nullptr};
 }
 }
 
@@ -253,6 +277,7 @@ const PipelineComponentRegistry& PipelineRouter::defaultComponents() {
 	static const auto registry = [] {
 		PipelineComponentRegistry value;
 		value.registerFactory("clickhouse", &clickhouse_factory);
+		value.registerFactory("filter", &filter_factory);
 		value.registerType("otel", &forward_pipeline_record);
 		value.registerType("opentelemetry", &forward_pipeline_record);
 		value.registerType("forward", &forward_pipeline_record);

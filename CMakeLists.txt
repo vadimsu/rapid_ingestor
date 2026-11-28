@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(rapid_ingestor)
+enable_testing()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -49,3 +50,14 @@ target_link_libraries (
 set_target_properties(rapid_ingestor
         PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(pipeline_execution_plan_test
+        tests/pipeline_execution_plan_test.cc)
+target_include_directories(pipeline_execution_plan_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(pipeline_execution_plan_test PRIVATE
+        SEASTAR_SSTRING SEASTAR_HEAPPROF
+        SEASTAR_SCHEDULING_GROUPS_COUNT=16)
+target_link_libraries(pipeline_execution_plan_test PRIVATE Seastar::seastar)
+add_test(NAME pipeline_execution_plan_test
+        COMMAND pipeline_execution_plan_test)
