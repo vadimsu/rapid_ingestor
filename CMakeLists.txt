@@ -21,8 +21,7 @@ include_directories(
 )
 link_directories(nghttp2/lib/.libs)
 
-add_executable (
-        rapid_ingestor
+set(RAPID_INGESTOR_CORE_SOURCES
 	src/rapid_ingestor_listener.cc
 	src/rapid_ingestor_forward_protocol.cc
 	src/rapid_ingestor_otel.cc
@@ -36,8 +35,11 @@ add_executable (
 	generated/opentelemetry/proto/collector/logs/v1/logs_service.pb.cc
 	generated/opentelemetry/proto/collector/trace/v1/trace_service.pb.cc
 	generated/opentelemetry/proto/collector/metrics/v1/metrics_service.pb.cc
-        src/rapid_ingestor.cc
 )
+
+add_executable(rapid_ingestor
+        ${RAPID_INGESTOR_CORE_SOURCES}
+        src/rapid_ingestor.cc)
 
 target_link_libraries (
         rapid_ingestor
@@ -61,3 +63,25 @@ target_compile_definitions(pipeline_execution_plan_test PRIVATE
 target_link_libraries(pipeline_execution_plan_test PRIVATE Seastar::seastar)
 add_test(NAME pipeline_execution_plan_test
         COMMAND pipeline_execution_plan_test)
+
+add_executable(pipeline_router_factory_test
+        ${RAPID_INGESTOR_CORE_SOURCES}
+        tests/pipeline_router_factory_test.cc)
+target_include_directories(pipeline_router_factory_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/seastar/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/json/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/nghttp2/lib/includes
+        ${CMAKE_CURRENT_SOURCE_DIR}/generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/opentelemetry-proto/gen/cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/protobuf/src)
+target_link_libraries(pipeline_router_factory_test
+        PRIVATE libnghttp2.a
+        PRIVATE ZLIB::ZLIB
+        PRIVATE Seastar::seastar
+        PRIVATE protobuf::libprotobuf)
+target_compile_definitions(pipeline_router_factory_test PRIVATE
+        SEASTAR_SSTRING SEASTAR_HEAPPROF
+        SEASTAR_SCHEDULING_GROUPS_COUNT=16)
+add_test(NAME pipeline_router_factory_test
+        COMMAND pipeline_router_factory_test)
